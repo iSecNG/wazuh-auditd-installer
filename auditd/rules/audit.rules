@@ -1,0 +1,591 @@
+##############################################################################
+# AUDITD RULESET
+# /etc/audit/rules.d/audit.rules
+#
+# Organized by security use-case. Each section documents:
+#   - What is logged and why
+#   - The key name used for filtering with ausearch/aureport
+#
+# Query examples:
+#   ausearch -k <key>          -- search by key
+#   ausearch -k <key> -i       -- human-readable interpretation
+#   aureport --summary         -- high-level summary
+#   ausearch --start today     -- events since midnight
+##############################################################################
+
+
+# ============================================================================
+# SECTION 1 -- GLOBAL SETTINGS
+# ============================================================================
+# Remove any pre-existing rules so this file is the single source of truth.
+-D
+
+# Kernel audit buffer size. Increase if events are being dropped (lost > 0
+# in `auditctl -s`). 16384 handles moderate-load servers; raise to 32768
+# on busy hosts.
+-b 16384
+
+# Failure mode when the kernel audit subsystem is overwhelmed or encounters
+# an error:  0 = silent, 1 = printk (log to kernel ring buffer), 2 = panic.
+# Mode 1 is safe for most environments. Use mode 2 only on air-gapped or
+# compliance-critical systems where losing audit records is unacceptable.
+-f 1
+
+# Continue loading rules even if a watch target does not exist on this host.
+# This allows a single ruleset to be deployed across heterogeneous systems.
+-i
+
+
+# ============================================================================
+# SECTION 2 -- FILTERS (apply early -- auditd is first-match-wins)
+# ============================================================================
+# Purpose: suppress high-frequency, low-value events that would otherwise
+# flood the log and obscure meaningful alerts.
+
+# Cron daemon -- its own activity is not user-attributable and generates
+# extreme log volume. Individual cron job files are still watched below.
+-a never,user -F subj_type=crond_t
+-a never,exit -F subj_type=crond_t
+
+# Shared-memory reads under /dev/shm -- typically OS IPC, not security-relevant.
+-a never,exit -F arch=b64 -F dir=/dev/shm -F perm=r
+
+# LVM lock files -- very high frequency, no security value.
+-a never,exit -F arch=b64 -F dir=/var/lock/lvm/
+
+
+# ============================================================================
+# SECTION 3 -- SELF-AUDITING: PROTECT THE AUDIT SUBSYSTEM
+# ============================================================================
+# Purpose: detect tampering with audit logs, configuration, or tools.
+# Any modification to these files should be treated as a high-priority alert.
+#
+# An attacker who can read the audit log learns what is being monitored.
+# One who can write to it can cover their tracks.
+# One who modifies /etc/audit/ can disable or narrow future recording.
+#
+# Keys: auditlog, auditconfig, audispconfig, audittools
+
+# Audit log directory -- watch for writes, reads, and attribute changes.
+-w /var/log/audit/ -p wra -k auditlog
+
+# Auditd configuration files -- changes here affect what gets recorded.
+-w /etc/audit/ -p wa -k auditconfig
+-w /etc/libaudit.conf -p wa -k auditconfig
+
+# Audit management binaries -- attackers may run auditctl -D to flush all
+# rules, or stop the daemon, silencing all future recording.
+-w /sbin/auditctl -p x -k audittools
+-w /usr/sbin/auditctl -p x -k audittools
+-w /sbin/auditd -p x -k audittools
+-w /usr/sbin/auditd -p x -k audittools
+-w /usr/sbin/augenrules -p x -k audittools
+-w /usr/sbin/ausearch -p x -k audittools
+-w /usr/sbin/aureport -p x -k audittools
+-w /usr/sbin/aulast -p x -k audittools
+-w /usr/sbin/auvirt -p x -k audittools
+
+
+# ============================================================================
+# SECTION 4 -- COMMAND EXECUTION
+# ============================================================================
+# Purpose: record every command executed by non-system users via the execve()
+# syscall. Combined with PROCTITLE and EXECVE kernel records this captures:
+# who ran it, what the full command line was, when, and from which parent
+# process. Essential for incident reconstruction.
+#
+# Keys: exec, exec_root_unattributed, priv_esc
+
+# 64-bit userspace commands (interactive sessions and scripts).
+-a always,exit -F arch=b64 -S execve -F auid>=1000 -F auid!=-1 -k exec
+
+# 32-bit userspace commands (legacy binaries, Wine applications, etc.)
+-a always,exit -F arch=b32 -S execve -F auid>=1000 -F auid!=-1 -k exec
+
+# Commands run as root (uid=0) with no login session (auid=-1) -- catches
+# cron jobs, at tasks, and commands run from init/startup scripts.
+-a always,exit -F arch=b64 -S execve -F uid=0 -F auid=-1 -k exec_root_unattributed
+-a always,exit -F arch=b32 -S execve -F uid=0 -F auid=-1 -k exec_root_unattributed
+
+# Privilege-escalation vectors -- execution always recorded regardless of uid.
+# su/sudo: explicit privilege switch; pkexec: CVE-2021-4034 (PwnKit);
+# dbus-send: CVE-2021-3560 (polkit bypass leading to local root).
+-w /bin/su -p x -k priv_esc
+-w /usr/bin/sudo -p x -k priv_esc
+-w /usr/bin/pkexec -p x -k priv_esc
+-w /usr/bin/dbus-send -p x -k priv_esc
+
+
+# ============================================================================
+# SECTION 5 -- SERVICE MANAGEMENT (CREATE, MODIFY, DELETE)
+# ============================================================================
+# Purpose: detect persistence via new or modified systemd units, SysV init
+# scripts, or cron-based service equivalents. Creating or modifying a unit
+# file and enabling it is MITRE ATT&CK technique T1543.002 (Create or Modify
+# System Process: Systemd Service).
+#
+# Keys: service_exec, service_change, cron, modules
+
+# systemctl binary -- every service start/stop/enable/disable/mask invocation.
+-w /bin/systemctl -p x -k service_exec
+-w /usr/bin/systemctl -p x -k service_exec
+
+# systemd unit directories -- new or modified .service/.timer/.socket files.
+-w /etc/systemd/system/ -p wa -k service_change
+-w /usr/lib/systemd/system/ -p wa -k service_change
+-w /lib/systemd/system/ -p wa -k service_change
+-w /run/systemd/system/ -p wa -k service_change
+
+# User-level systemd units (can achieve persistence per-user without root).
+-w /etc/systemd/user/ -p wa -k service_change
+-w /usr/lib/systemd/user/ -p wa -k service_change
+
+# systemd global configuration (DefaultEnvironment, resource limits, etc.)
+-w /etc/systemd/ -p wa -k service_change
+
+# systemd generators produce transient units at boot -- a stealthy persistence
+# vector because the generated units do not appear in standard unit listings.
+-w /usr/lib/systemd/system-generators/ -p wa -k service_change
+
+# SysV init scripts -- legacy but still present on many systems.
+-w /etc/init.d/ -p wa -k service_change
+
+# Cron -- a common alternative persistence path; new entries in cron.d or
+# the user crontab can survive reboots and run arbitrary commands as root.
+-w /etc/crontab -p wa -k cron
+-w /etc/cron.d/ -p wa -k cron
+-w /etc/cron.daily/ -p wa -k cron
+-w /etc/cron.hourly/ -p wa -k cron
+-w /etc/cron.weekly/ -p wa -k cron
+-w /etc/cron.monthly/ -p wa -k cron
+-w /var/spool/cron/ -p wa -k cron
+-w /etc/cron.allow -p wa -k cron
+-w /etc/cron.deny -p wa -k cron
+
+# Kernel module loading -- a loadable kernel module (LKM) can act as a
+# persistent rootkit with full kernel privileges. delete_module is also
+# logged to detect an attacker unloading a security module (e.g. AppArmor).
+-a always,exit -F arch=b64 -S init_module -S finit_module -S delete_module -F auid!=-1 -k modules
+-a always,exit -F perm=x -F auid!=-1 -F path=/sbin/insmod -k modules
+-a always,exit -F perm=x -F auid!=-1 -F path=/sbin/modprobe -k modules
+-a always,exit -F perm=x -F auid!=-1 -F path=/sbin/rmmod -k modules
+-w /etc/modprobe.conf -p wa -k modules
+-w /etc/modprobe.d/ -p wa -k modules
+
+
+# ============================================================================
+# SECTION 6 -- CRITICAL FILE ACCESS
+# ============================================================================
+# Purpose: detect reads and writes to files whose compromise could lead to
+# full system takeover, credential theft, or persistent backdoor access.
+#
+# Keys: identity, pam, sshd, rootkey, sudoers, ssl_keys, network_config,
+#       kernel_config, boot_config, lib_preload, login, syslog, access_denied
+
+# --- Identity & authentication databases ---
+# Writes indicate account manipulation. Reads of /etc/shadow by non-root
+# processes indicate credential harvesting.
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+
+# --- PAM (Pluggable Authentication Modules) ---
+# Modifying PAM config can silently disable authentication controls or add
+# a backdoor module (e.g. pam_exec running a reverse shell on every login).
+-w /etc/pam.d/ -p wa -k pam
+-w /etc/security/limits.conf -p wa -k pam
+-w /etc/security/limits.d/ -p wa -k pam
+-w /etc/security/pam_env.conf -p wa -k pam
+-w /etc/security/namespace.conf -p wa -k pam
+
+# --- SSH ---
+# sshd_config changes can enable root login, disable host-key checking,
+# or inject a ForceCommand backdoor. authorized_keys changes add SSH backdoors.
+-w /etc/ssh/sshd_config -p wa -k sshd
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd
+-w /root/.ssh/ -p wa -k rootkey
+
+# --- Sudoers ---
+# Adding entries grants arbitrary root access without a password prompt.
+-w /etc/sudoers -p wa -k sudoers
+-w /etc/sudoers.d/ -p wa -k sudoers
+
+# --- SSL/TLS certificates and private keys ---
+# Exfiltration of private keys enables MITM attacks against TLS services.
+# Watching reads (r) as well because key material should never leave the box.
+-w /etc/ssl/private/ -p rwxa -k ssl_keys
+-w /etc/pki/ -p rwxa -k ssl_keys
+
+# --- Network configuration ---
+# /etc/hosts manipulation is used for DNS spoofing and redirecting traffic
+# to attacker-controlled servers (T1565.001 -- Stored Data Manipulation).
+-w /etc/hosts -p wa -k network_config
+-w /etc/hostname -p wa -k network_config
+-w /etc/resolv.conf -p wa -k network_config
+-w /etc/network/ -p wa -k network_config
+-a always,exit -F arch=b64 -S sethostname -S setdomainname -k network_config
+
+# --- Kernel / boot configuration ---
+# sysctl parameters can disable ASLR, enable IP forwarding, or turn off
+# kernel hardening features. Boot loader changes can plant a persistent rootkit.
+-w /etc/sysctl.conf -p wa -k kernel_config
+-w /etc/sysctl.d/ -p wa -k kernel_config
+-w /boot/grub/ -p wa -k boot_config
+
+# --- Library preload ---
+# /etc/ld.so.preload is one of the most well-known rootkit persistence paths:
+# any shared object listed here is injected into EVERY process at startup,
+# giving the attacker code execution in all future processes.
+-w /etc/ld.so.preload -p wa -k lib_preload
+-w /etc/ld.so.conf -p wa -k lib_preload
+-w /etc/ld.so.conf.d/ -p wa -k lib_preload
+
+# --- Login / session tracking files ---
+# Modifications or truncation erase evidence of past user sessions; combined
+# with log wiping this makes intrusion reconstruction very difficult.
+-w /var/log/faillog -p wa -k login
+-w /var/log/lastlog -p wa -k login
+-w /var/log/btmp -p wa -k login
+-w /var/log/wtmp -p wa -k login
+-w /var/run/utmp -p wa -k login
+-w /etc/login.defs -p wa -k login
+
+# --- System logs ---
+# Deletion, truncation, or chmod of these files is a clear sign of
+# anti-forensic log tampering after a compromise.
+-w /var/log/syslog -p wa -k syslog
+-w /var/log/kern.log -p wa -k syslog
+-w /var/log/auth.log -p wa -k syslog
+
+# --- Failed file-open attempts on critical directories ---
+# Repeated EACCES/EPERM failures indicate an attacker probing for files
+# they cannot access -- a strong signal of post-compromise reconnaissance
+# or privilege-escalation staging (T1083 -- File and Directory Discovery).
+-a always,exit -F arch=b64 -S open -S openat -F dir=/etc -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/root -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/home -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/var/log -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/usr/bin -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/usr/sbin -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/bin -F success=0 -k access_denied
+-a always,exit -F arch=b64 -S open -S openat -F dir=/sbin -F success=0 -k access_denied
+
+
+# ============================================================================
+# SECTION 7 -- USER AND GROUP MANAGEMENT
+# ============================================================================
+# Purpose: track all account lifecycle events (creation, deletion,
+# modification). Required for SOC 2, PCI-DSS, ISO 27001, and HIPAA audits.
+#
+# Keys: user_mgmt, group_mgmt
+
+-w /usr/sbin/useradd -p x -k user_mgmt
+-w /usr/sbin/userdel -p x -k user_mgmt
+-w /usr/sbin/usermod -p x -k user_mgmt
+-w /usr/sbin/adduser -p x -k user_mgmt
+-w /usr/bin/passwd -p x -k user_mgmt
+# chage: modifying password expiry is a way to re-enable a disabled account
+-w /usr/bin/chage -p x -k user_mgmt
+# chfn: can change the GECOS/finger information field in /etc/passwd
+-w /usr/bin/chfn -p x -k user_mgmt
+
+-w /usr/sbin/groupadd -p x -k group_mgmt
+-w /usr/sbin/groupmod -p x -k group_mgmt
+-w /usr/sbin/groupdel -p x -k group_mgmt
+-w /usr/sbin/addgroup -p x -k group_mgmt
+
+
+# ============================================================================
+# SECTION 8 -- DISCRETIONARY ACCESS CONTROL (DAC) MODIFICATIONS
+# ============================================================================
+# Purpose: record when users change file permissions or ownership.
+# Post-exploit, attackers commonly: chmod 777 sensitive files, chown root
+# a shell binary, or set the setuid bit on an executable to create a
+# persistent root backdoor.
+#
+# Key: perm_mod
+
+-a always,exit -F arch=b64 -S chmod -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S chown -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S fchmod -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S fchmodat -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S fchown -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S fchownat -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S lchown -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S setxattr -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S lsetxattr -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S fsetxattr -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S removexattr -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S lremovexattr -F auid>=1000 -F auid!=-1 -k perm_mod
+-a always,exit -F arch=b64 -S fremovexattr -F auid>=1000 -F auid!=-1 -k perm_mod
+
+
+# ============================================================================
+# SECTION 9 -- TIME MANIPULATION
+# ============================================================================
+# Purpose: attackers may shift system time to invalidate log timestamps,
+# confuse SIEM correlation windows, or bypass certificate validity checks.
+# adjtimex, settimeofday, and clock_settime are the three kernel interfaces
+# for changing wall-clock time.
+#
+# Key: time_change
+
+-a always,exit -F arch=b64 -S adjtimex -S settimeofday -S clock_settime -k time_change
+-w /etc/localtime -p wa -k time_change
+
+
+# ============================================================================
+# SECTION 10 -- NETWORK AND FIREWALL CHANGES
+# ============================================================================
+# Purpose: firewall rule changes may open inbound ports for C2 channels;
+# routing changes may intercept or redirect traffic to attacker infrastructure.
+#
+# Keys: firewall, network_tools, remote_shell
+
+# Firewall management tools.
+-w /sbin/iptables -p x -k firewall
+-w /sbin/ip6tables -p x -k firewall
+-w /usr/sbin/nft -p x -k firewall
+-w /sbin/xtables-nft-multi -p x -k firewall
+-w /usr/sbin/arptables -p x -k firewall
+-w /usr/sbin/ebtables -p x -k firewall
+-w /usr/sbin/ufw -p x -k firewall
+
+# Network reconnaissance and packet capture tools.
+# Execution of these on a production server warrants immediate investigation.
+-w /usr/sbin/tcpdump -p x -k network_tools
+-w /usr/sbin/traceroute -p x -k network_tools
+-w /usr/bin/netstat -p x -k network_tools
+-w /usr/bin/ss -p x -k network_tools
+-w /bin/nc -p x -k network_tools
+-w /bin/nc.openbsd -p x -k network_tools
+
+# Successful outbound connections made by interactive shells -- strong
+# indicator of a reverse shell callback (T1059 -- Command and Scripting
+# Interpreter). Legitimate shells almost never call connect() themselves.
+-a always,exit -F arch=b64 -F exe=/bin/bash -F success=1 -S connect -k remote_shell
+-a always,exit -F arch=b64 -F exe=/usr/bin/bash -F success=1 -S connect -k remote_shell
+-a always,exit -F arch=b64 -F exe=/bin/sh -F success=1 -S connect -k remote_shell
+-a always,exit -F arch=b64 -F exe=/usr/bin/sh -F success=1 -S connect -k remote_shell
+
+
+# ============================================================================
+# SECTION 11 -- DATA EXFILTRATION INDICATORS
+# ============================================================================
+# Purpose: log use of tools commonly used to stage and exfiltrate data.
+# Execution alone is not proof of malice but provides forensic breadcrumbs
+# to reconstruct the chain of events during an incident.
+#
+# Keys: exfil_tools, compression
+
+# Transfer tools.
+-w /usr/bin/wget -p x -k exfil_tools
+-w /usr/bin/curl -p x -k exfil_tools
+-w /usr/bin/scp -p x -k exfil_tools
+-w /usr/bin/sftp -p x -k exfil_tools
+-w /usr/bin/ftp -p x -k exfil_tools
+-w /usr/bin/rsync -p x -k exfil_tools
+# base64: frequently used to encode binary payloads or data before transfer
+-w /usr/bin/base64 -p x -k exfil_tools
+
+# Compression tools -- often used to archive and minimize data before exfil.
+-w /usr/bin/zip -p x -k compression
+-w /usr/bin/gzip -p x -k compression
+-w /usr/bin/bzip2 -p x -k compression
+-w /usr/bin/tar -p x -k compression
+-w /usr/bin/zstd -p x -k compression
+-w /usr/bin/xz -p x -k compression
+
+
+# ============================================================================
+# SECTION 12 -- SUSPICIOUS / RECON ACTIVITY
+# ============================================================================
+# Purpose: log tools an attacker typically runs during the reconnaissance
+# phase immediately after initial access to understand the environment,
+# enumerate users, and find lateral movement targets.
+#
+# Keys: recon, interpreter
+
+-w /usr/bin/whoami -p x -k recon
+-w /usr/bin/id -p x -k recon
+-w /bin/hostname -p x -k recon
+-w /bin/uname -p x -k recon
+-w /usr/bin/uptime -p x -k recon
+-w /usr/bin/w -p x -k recon
+-w /usr/bin/last -p x -k recon
+# /etc/issue read: often used by scripts to fingerprint the OS distribution
+-w /etc/issue -p r -k recon
+-w /etc/hostname -p r -k recon
+
+# Scripting interpreters -- frequently used to upgrade a basic shell to a
+# fully interactive one (e.g. python3 -c 'import pty; pty.spawn("/bin/bash")')
+# or to execute in-memory payloads that never touch disk.
+-w /usr/bin/python3 -p x -k interpreter
+-w /usr/bin/perl -p x -k interpreter
+
+
+# ============================================================================
+# SECTION 13 -- POWER, SPECIAL FILES, AND SYSTEM STATE
+# ============================================================================
+# Purpose: unexpected reboots/shutdowns may wipe volatile memory evidence or
+# trigger boot-level persistence. Special device files and mounts are common
+# lateral-movement staging steps.
+#
+# Keys: power, kexec, mknod, mount
+
+-w /sbin/shutdown -p x -k power
+-w /sbin/poweroff -p x -k power
+-w /sbin/reboot -p x -k power
+-w /sbin/halt -p x -k power
+
+# kexec: loads a new kernel in-memory without a full reboot. Can be used to
+# bypass disk-based audit logs or to chainload a compromised kernel image.
+-a always,exit -F arch=b64 -S kexec_load -k kexec
+
+# mknod: can create raw device access nodes that bypass filesystem permission
+# checks (e.g. creating /dev/sda to read disk blocks directly).
+-a always,exit -F arch=b64 -S mknod -S mknodat -k mknod
+
+# Mount/unmount: mounting external media or a FUSE filesystem can be used
+# to introduce malicious binaries or exfiltrate data outside normal access
+# controls.
+-a always,exit -F arch=b64 -S mount -S umount2 -F auid!=-1 -k mount
+
+
+# ============================================================================
+# SECTION 14 -- WAZUH AGENT INTEGRITY
+# ============================================================================
+# Purpose: detect any attempt to tamper with, silence, or subvert the Wazuh
+# security agent installed at /var/ossec/. This is a critical protection
+# layer: an attacker who disables or modifies the agent can operate without
+# generating alerts, effectively blinding the SOC.
+#
+# Threat scenarios covered:
+#   - Binary replacement: swap a Wazuh daemon with a trojan to silence events
+#   - Config manipulation: alter ossec.conf to disable modules, shrink scope,
+#     or redirect the agent to a rogue manager
+#   - Key theft: steal client.keys to impersonate this agent on the network
+#   - Log wiping: delete or truncate /var/ossec/logs/ to destroy local evidence
+#   - Library injection: replace a shared library in /var/ossec/lib/ to hook
+#     into daemon internals and filter outbound events
+#   - Active-response tampering: modify response scripts to neutralize
+#     automated countermeasures (e.g. IP block scripts)
+#   - Agent stop/restart: killing or restarting the agent is a common first
+#     step before carrying out further malicious activity undetected
+#
+# Keys: wazuh_config, wazuh_keys, wazuh_bin, wazuh_lib, wazuh_logs,
+#       wazuh_ar, wazuh_ruleset, wazuh_exec
+
+# --- Configuration files ---
+# ossec.conf controls every aspect of the agent: which logs to collect,
+# which FIM paths to watch, which modules are active, and which manager to
+# connect to. internal_options.conf and local_internal_options.conf set
+# low-level tunables that can raise thresholds or disable features entirely.
+-w /var/ossec/etc/ossec.conf -p wa -k wazuh_config
+-w /var/ossec/etc/internal_options.conf -p wa -k wazuh_config
+-w /var/ossec/etc/local_internal_options.conf -p wa -k wazuh_config
+-w /var/ossec/etc/shared/ -p wa -k wazuh_config
+
+# --- Agent authentication key ---
+# client.keys contains the pre-shared key used to authenticate this agent
+# to the Wazuh manager. Theft allows an attacker to impersonate this endpoint
+# and inject false events, or to register a rogue agent under this identity.
+# Reading it is also suspicious (key exfiltration), so watch reads too (r).
+-w /var/ossec/etc/client.keys -p rwa -k wazuh_keys
+
+# --- WPK root certificate ---
+# wpk_root.pem is the certificate used to verify signed agent upgrade packages
+# (WPK files). Replacing it lets an attacker push unsigned/malicious upgrades.
+-w /var/ossec/etc/wpk_root.pem -p wa -k wazuh_keys
+
+# --- SSH keys (used by agentless monitoring) ---
+# /var/ossec/.ssh/ holds keys for password-less agentless scans of remote
+# hosts. Compromise enables lateral movement to those remote targets.
+-w /var/ossec/.ssh/ -p rwa -k wazuh_keys
+
+# --- Agent binaries ---
+# Replacing any of these daemons with a trojan is the most direct way to
+# silence the agent. Watch for writes and attribute changes (wa); execution
+# is always logged by the execve rules in section 4 already.
+# wazuh-agentd:     main agent daemon, manages manager connection
+# wazuh-syscheckd:  FIM (File Integrity Monitoring) engine
+# wazuh-logcollector: collects log files and forwards them
+# wazuh-modulesd:   runs syscollector, SCA, and other modules
+# wazuh-execd:      executes active-response commands
+# wazuh-control:    init script that starts/stops all agent processes
+# agent-auth:       registers the agent with a manager (key enrollment)
+# manage_agents:    manages agent keys locally
+-w /var/ossec/bin/wazuh-agentd -p wa -k wazuh_bin
+-w /var/ossec/bin/wazuh-syscheckd -p wa -k wazuh_bin
+-w /var/ossec/bin/wazuh-logcollector -p wa -k wazuh_bin
+-w /var/ossec/bin/wazuh-modulesd -p wa -k wazuh_bin
+-w /var/ossec/bin/wazuh-execd -p wa -k wazuh_bin
+-w /var/ossec/bin/wazuh-control -p wa -k wazuh_bin
+-w /var/ossec/bin/agent-auth -p wa -k wazuh_bin
+-w /var/ossec/bin/manage_agents -p wa -k wazuh_bin
+
+# Execution of wazuh-control is the primary way to stop or restart the agent.
+# Any invocation outside of known maintenance windows is suspicious.
+-w /var/ossec/bin/wazuh-control -p x -k wazuh_exec
+
+# Execution of agent-auth re-enrolls the agent with a (possibly rogue)
+# manager; execution of manage_agents can delete or replace authentication keys.
+-w /var/ossec/bin/agent-auth -p x -k wazuh_exec
+-w /var/ossec/bin/manage_agents -p x -k wazuh_exec
+
+# --- Shared libraries ---
+# The Wazuh daemons dynamically load these libraries. Replacing one with a
+# malicious version (e.g. one that drops all FIM events) is a sophisticated
+# but effective tamper technique that leaves the daemon process running
+# normally while silently filtering its output.
+-w /var/ossec/lib/ -p wa -k wazuh_lib
+
+# --- Agent logs ---
+# /var/ossec/logs/ contains ossec.log (main agent activity log) and
+# subdirectories for individual module logs. Deletion or truncation destroys
+# the local forensic record of what the agent detected and reported.
+-w /var/ossec/logs/ -p wa -k wazuh_logs
+
+# --- Active-response scripts ---
+# Scripts under active-response/bin/ are executed automatically by wazuh-execd
+# in response to alerts (e.g. firewall-drop.sh, disable-account.sh).
+# Tampering with these scripts can neutralize automated defenses or turn them
+# into attacker-controlled execution vectors.
+-w /var/ossec/active-response/bin/ -p wa -k wazuh_ar
+
+# --- Ruleset and SCA policies ---
+# The ruleset directory contains detection rules and decoders; SCA policies
+# define compliance checks. Modifying these can suppress specific alert
+# categories or weaken compliance scoring without stopping the agent entirely.
+-w /var/ossec/ruleset/ -p wa -k wazuh_ruleset
+
+# --- Queue sockets ---
+# The queue/sockets/ directory holds the UNIX domain sockets through which
+# agent components communicate. Removal or replacement of these sockets can
+# disrupt inter-process messaging and cause components to silently stop
+# forwarding events.
+-w /var/ossec/queue/sockets/ -p wa -k wazuh_config
+
+# --- Upgrade staging area ---
+# var/incoming/ and var/upgrade/ are used during WPK upgrades. Writing files
+# here outside of a legitimate upgrade cycle may indicate a malicious package
+# being staged for execution under the wazuh-execd process.
+-w /var/ossec/var/incoming/ -p wa -k wazuh_bin
+-w /var/ossec/var/upgrade/ -p wa -k wazuh_bin
+
+
+# ============================================================================
+# SECTION 15 -- FINALIZE: MAKE RULES IMMUTABLE
+# ============================================================================
+# Lock the ruleset so it cannot be modified at runtime without a reboot.
+#
+# IMPORTANT: keep this commented out during initial tuning/testing, then
+# enable it once the ruleset is stable. With -e 2 active, `auditctl -D`
+# and all rule changes require a full system reboot to take effect.
+#
+# Check current state:  auditctl -s | grep enabled
+#   0 = no rules loaded   1 = rules loaded (mutable)   2 = immutable
+#
+# -e 2

@@ -1,0 +1,34 @@
+<!--
+  LAUREL JSON Decoder for Wazuh
+  ==============================
+  Deploy to: /var/ossec/etc/decoders/laurel_decoder.xml  (on the Wazuh MANAGER)
+
+  When LAUREL logs are read with <log_format>json</log_format>, Wazuh's built-in
+  JSON parser handles field extraction automatically.  This decoder exists as a
+  fallback for environments where LAUREL events arrive via syslog forwarding
+  (the JSON payload is embedded inside a syslog line).
+
+  It also provides a named decoder ("laurel") so that rules can reference
+  <decoded_as>laurel</decoded_as> if desired.
+-->
+
+<!-- ======================================================================= -->
+<!-- Primary decoder: matches the opening of every LAUREL JSON line.         -->
+<!-- The built-in JSON_Decoder plugin extracts all nested fields.            -->
+<!-- ======================================================================= -->
+<decoder name="laurel">
+  <prematch>^{"ID":"</prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<!-- ======================================================================= -->
+<!-- Syslog-wrapped variant: LAUREL output forwarded via rsyslog / syslog-ng -->
+<!-- strips the standard syslog header first, then delegates to the primary  -->
+<!-- decoder above.                                                          -->
+<!-- Example input:                                                          -->
+<!--   Mar 28 12:00:01 host laurel: {"ID":"1774736523.293:33385", ...}       -->
+<!-- ======================================================================= -->
+<decoder name="laurel-syslog">
+  <prematch>laurel: </prematch>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
