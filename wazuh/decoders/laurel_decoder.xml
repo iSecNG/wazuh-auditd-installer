@@ -1,34 +1,29 @@
 <!--
   LAUREL JSON Decoder for Wazuh
-  ==============================
   Deploy to: /var/ossec/etc/decoders/laurel_decoder.xml  (on the Wazuh MANAGER)
 
-  When LAUREL logs are read with <log_format>json</log_format>, Wazuh's built-in
-  JSON parser handles field extraction automatically.  This decoder exists as a
-  fallback for environments where LAUREL events arrive via syslog forwarding
-  (the JSON payload is embedded inside a syslog line).
-
-  It also provides a named decoder ("laurel") so that rules can reference
-  <decoded_as>laurel</decoded_as> if desired.
+  With <log_format>json</log_format> Wazuh parses LAUREL events itself and this
+  file is not needed. It exists for events arriving over syslog, and to give
+  rules a named decoder to reference via <decoded_as>laurel</decoded_as>.
 -->
 
-<!-- ======================================================================= -->
-<!-- Primary decoder: matches the opening of every LAUREL JSON line.         -->
-<!-- The built-in JSON_Decoder plugin extracts all nested fields.            -->
-<!-- ======================================================================= -->
+<!-- Direct: a raw LAUREL JSON line. -->
 <decoder name="laurel">
   <prematch>^{"ID":"</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>
 
-<!-- ======================================================================= -->
-<!-- Syslog-wrapped variant: LAUREL output forwarded via rsyslog / syslog-ng -->
-<!-- strips the standard syslog header first, then delegates to the primary  -->
-<!-- decoder above.                                                          -->
-<!-- Example input:                                                          -->
-<!--   Mar 28 12:00:01 host laurel: {"ID":"1774736523.293:33385", ...}       -->
-<!-- ======================================================================= -->
+<!--
+  Syslog-wrapped: rsyslog / syslog-ng forwarding. Wazuh's syslog pre-decoder
+  strips the header once program_name matches, leaving the bare JSON for
+  JSON_Decoder. The previous version matched on "laurel: " without a
+  program_name, so JSON_Decoder was handed the full syslog line and failed.
+
+  Example input:
+    Mar 28 12:00:01 host laurel: {"ID":"1774736523.293:33385", ...}
+-->
 <decoder name="laurel-syslog">
-  <prematch>laurel: </prematch>
+  <program_name>^laurel$</program_name>
+  <prematch>^{"ID":"</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>

@@ -118,6 +118,7 @@ fi
 
 if [[ "${SKIP_LAUREL}" != "true" ]]; then
     install_laurel
+    configure_laurel_localfile
 else
     info "Skipping LAUREL (--skip-laurel)"
 fi
@@ -125,11 +126,15 @@ fi
 # ---- Post-install verification ----
 section "Verification"
 
+# Counted so the exit status tells automation whether the host ended up healthy.
+VERIFY_FAILED=0
+
 if [[ "${DRY_RUN}" != "true" ]]; then
     if systemctl is-active --quiet wazuh-agent; then
         ok "wazuh-agent  : running"
     else
         warn "wazuh-agent not active — check: journalctl -u wazuh-agent"
+        VERIFY_FAILED=$((VERIFY_FAILED + 1))
     fi
 
     if [[ "${SKIP_AUDITD}" != "true" ]]; then
@@ -137,6 +142,7 @@ if [[ "${DRY_RUN}" != "true" ]]; then
             ok "auditd       : running"
         else
             warn "auditd not active"
+            VERIFY_FAILED=$((VERIFY_FAILED + 1))
         fi
     fi
 
@@ -145,6 +151,7 @@ if [[ "${DRY_RUN}" != "true" ]]; then
             ok "laurel       : running  (pid $(pgrep -x laurel | head -1))"
         else
             warn "LAUREL process not detected — verify with: pgrep -a laurel"
+            VERIFY_FAILED=$((VERIFY_FAILED + 1))
         fi
     fi
 else
@@ -153,5 +160,10 @@ fi
 
 echo
 echo -e "${BOLD}================================================================${NC}"
+if (( VERIFY_FAILED > 0 )); then
+    echo -e "${YELLOW}${BOLD}  Installation finished with ${VERIFY_FAILED} warning(s) — see above.${NC}"
+    echo -e "${BOLD}================================================================${NC}"
+    exit 1
+fi
 echo -e "${GREEN}${BOLD}  Installation complete.${NC}"
 echo -e "${BOLD}================================================================${NC}"

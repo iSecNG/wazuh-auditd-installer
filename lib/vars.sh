@@ -15,6 +15,9 @@ Wazuh agent deployment variables:
   --registration-server <addr>        WAZUH_REGISTRATION_SERVER (defaults to --manager)
   --registration-port <port>          WAZUH_REGISTRATION_PORT
   --registration-password <pass>      WAZUH_REGISTRATION_PASSWORD
+                                      Prefer the environment variable: a value
+                                      passed here is visible in `ps` and in
+                                      shell history to every local user.
   --keep-alive-interval <secs>        WAZUH_KEEP_ALIVE_INTERVAL
   --time-reconnect <secs>             WAZUH_TIME_RECONNECT
   --registration-ca <path>            WAZUH_REGISTRATION_CA
@@ -31,12 +34,25 @@ Install options:
   --skip-auditd                       Skip auditd installation/removal and ruleset
   --skip-laurel                       Skip LAUREL installation/removal
   --dry-run                           Print actions without executing them
-  --verbose                           Enable verbose output
+  --verbose                           Echo each command before it is executed
   -h, --help                          Show this help
 
 All --flags can be set as environment variables instead (e.g. WAZUH_MANAGER=10.0.0.1).
 CLI flags take precedence over environment variables.
 EOF
+}
+
+# Rejects a missing or flag-shaped option value instead of letting `set -u`
+# abort with "$2: unbound variable", or silently storing "--dry-run" as a value.
+_need_val() {
+    [[ $# -ge 2 && -n "$2" && "$2" != -* ]] \
+        || die "Option $1 requires a value  (use --help for usage)"
+}
+
+# Same, but accepts a value starting with "-" (passwords may legitimately).
+_need_any() {
+    [[ $# -ge 2 && -n "$2" ]] \
+        || die "Option $1 requires a value  (use --help for usage)"
 }
 
 parse_args() {
@@ -65,22 +81,22 @@ parse_args() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --manager)                      WAZUH_MANAGER="$2";                  shift 2 ;;
-            --manager-port)                 WAZUH_MANAGER_PORT="$2";             shift 2 ;;
-            --protocol)                     WAZUH_PROTOCOL="$2";                 shift 2 ;;
-            --registration-server)          WAZUH_REGISTRATION_SERVER="$2";      shift 2 ;;
-            --registration-port)            WAZUH_REGISTRATION_PORT="$2";        shift 2 ;;
-            --registration-password)        WAZUH_REGISTRATION_PASSWORD="$2";    shift 2 ;;
-            --keep-alive-interval)          WAZUH_KEEP_ALIVE_INTERVAL="$2";      shift 2 ;;
-            --time-reconnect)               WAZUH_TIME_RECONNECT="$2";           shift 2 ;;
-            --registration-ca)              WAZUH_REGISTRATION_CA="$2";          shift 2 ;;
-            --registration-certificate)     WAZUH_REGISTRATION_CERTIFICATE="$2"; shift 2 ;;
-            --registration-key)             WAZUH_REGISTRATION_KEY="$2";         shift 2 ;;
-            --agent-name)                   WAZUH_AGENT_NAME="$2";               shift 2 ;;
-            --agent-group)                  WAZUH_AGENT_GROUP="$2";              shift 2 ;;
-            --enrollment-delay)             ENROLLMENT_DELAY="$2";               shift 2 ;;
-            --wazuh-version)                WAZUH_VERSION="$2";                  shift 2 ;;
-            --package-path)                 PACKAGE_PATH="$2";                   shift 2 ;;
+            --manager)                      _need_val "$@"; WAZUH_MANAGER="$2";                  shift 2 ;;
+            --manager-port)                 _need_val "$@"; WAZUH_MANAGER_PORT="$2";             shift 2 ;;
+            --protocol)                     _need_val "$@"; WAZUH_PROTOCOL="$2";                 shift 2 ;;
+            --registration-server)          _need_val "$@"; WAZUH_REGISTRATION_SERVER="$2";      shift 2 ;;
+            --registration-port)            _need_val "$@"; WAZUH_REGISTRATION_PORT="$2";        shift 2 ;;
+            --registration-password)        _need_any "$@"; WAZUH_REGISTRATION_PASSWORD="$2";    shift 2 ;;
+            --keep-alive-interval)          _need_val "$@"; WAZUH_KEEP_ALIVE_INTERVAL="$2";      shift 2 ;;
+            --time-reconnect)               _need_val "$@"; WAZUH_TIME_RECONNECT="$2";           shift 2 ;;
+            --registration-ca)              _need_val "$@"; WAZUH_REGISTRATION_CA="$2";          shift 2 ;;
+            --registration-certificate)     _need_val "$@"; WAZUH_REGISTRATION_CERTIFICATE="$2"; shift 2 ;;
+            --registration-key)             _need_val "$@"; WAZUH_REGISTRATION_KEY="$2";         shift 2 ;;
+            --agent-name)                   _need_val "$@"; WAZUH_AGENT_NAME="$2";               shift 2 ;;
+            --agent-group)                  _need_val "$@"; WAZUH_AGENT_GROUP="$2";              shift 2 ;;
+            --enrollment-delay)             _need_val "$@"; ENROLLMENT_DELAY="$2";               shift 2 ;;
+            --wazuh-version)                _need_val "$@"; WAZUH_VERSION="$2";                  shift 2 ;;
+            --package-path)                 _need_val "$@"; PACKAGE_PATH="$2";                   shift 2 ;;
             --uninstall)                    UNINSTALL=true;                      shift   ;;
             --skip-auditd)                  SKIP_AUDITD=true;                    shift   ;;
             --skip-laurel)                  SKIP_LAUREL=true;                    shift   ;;

@@ -10,6 +10,20 @@
   Rule ID range: 100100 - 100399
   All rules belong to group "laurel".
 
+  Sibling precedence (measured on 4.14.6, not file order and not rule id):
+  a matching level-0 sibling always wins. So a rule that must out-rank the
+  level-0 "exec" catch-alls (100120/100121) has to be their CHILD, not their
+  sibling. Every exe/comm rule below therefore lists them in <if_sid> next to
+  100100, which keeps it reachable from all three populations:
+    key="exec"                   interactive user (auid>=1000)
+    key="exec_root_unattributed" cron/init (auid unset)
+    key=<specific>               root with auid=0, and all file watches
+
+  Validate field paths against one real event before trusting this file:
+    tail -1 /var/log/laurel/audit.log | /var/ossec/bin/wazuh-logtest
+
+  Levels and frequency/timeframe values are starting points. Baseline them.
+
   LAUREL JSON field reference (dot-notation as seen by Wazuh):
     SYSCALL.key       - audit rule key (e.g. "exec", "priv_esc")
     SYSCALL.exe       - full path of the executed binary
@@ -43,67 +57,10 @@
   </rule>
 
 
-  <!-- ===================================================================== -->
-  <!-- SECTION 3: SELF-AUDITING: PROTECT THE AUDIT SUBSYSTEM                 -->
-  <!-- Keys: auditlog, auditconfig, audittools                              -->
-  <!-- ===================================================================== -->
-
-  <rule id="100110" level="12">
-    <if_sid>100100</if_sid>
-    <field name="SYSCALL.key">^auditlog$</field>
-    <description>LAUREL: audit log directory accessed or modified -- possible evidence tampering.</description>
-    <group>laurel,audit_tampering,</group>
-    <mitre>
-      <id>T1070</id>
-      <id>T1070.002</id>
-    </mitre>
-  </rule>
-
-  <!-- Whitelist: wazuh-logcollector reading audit.log is normal agent operation -->
-  <rule id="100114" level="0">
-    <if_sid>100110</if_sid>
-    <field name="SYSCALL.exe">/var/ossec/bin/wazuh-logcollector$</field>
-    <description>LAUREL: audit log access by wazuh-logcollector (whitelisted).</description>
-    <group>laurel,audit_tampering,</group>
-  </rule>
-
-  <rule id="100111" level="12">
-    <if_sid>100100</if_sid>
-    <field name="SYSCALL.key">^auditconfig$</field>
-    <description>LAUREL: audit configuration modified -- detection coverage may be altered.</description>
-    <group>laurel,audit_tampering,</group>
-    <mitre>
-      <id>T1562.001</id>
-    </mitre>
-  </rule>
-
-  <rule id="100112" level="10">
-    <if_sid>100100</if_sid>
-    <field name="SYSCALL.key">^audittools$</field>
-    <description>LAUREL: audit management tool executed (auditctl/ausearch/aureport).</description>
-    <group>laurel,audit_tampering,</group>
-    <mitre>
-      <id>T1562.001</id>
-    </mitre>
-  </rule>
-
-  <!-- Elevated: auditctl executed specifically (can flush all rules) -->
-  <rule id="100113" level="13">
-    <if_sid>100112</if_sid>
-    <field name="SYSCALL.exe">auditctl$</field>
-    <description>LAUREL: auditctl executed -- rules may be flushed or modified at runtime.</description>
-    <group>laurel,audit_tampering,</group>
-    <mitre>
-      <id>T1562.001</id>
-    </mitre>
-  </rule>
-
-
-  <!-- ===================================================================== -->
-  <!-- SECTION 4: COMMAND EXECUTION                                          -->
-  <!-- Keys: exec, exec_root_unattributed, priv_esc                         -->
-  <!-- ===================================================================== -->
-
+  <!-- Exec tier. Level 0, so by the precedence rule above these out-rank any
+       matching sibling; the specific exe/comm rules name them as parents to
+       get past them. Declared here, before those rules, because a parent must
+       be defined first. -->
   <!-- Broad execve by interactive users; extremely high volume.             -->
   <!-- Level 0: captured by LAUREL for forensics; no Wazuh alert.           -->
   <rule id="100120" level="0">
@@ -134,11 +91,129 @@
     <group>laurel,execution,</group>
   </rule>
 
+  <!-- ===================================================================== -->
+  <!-- SECTION 3: SELF-AUDITING: PROTECT THE AUDIT SUBSYSTEM                 -->
+  <!-- Keys: auditlog, auditconfig, audittools                              -->
+  <!-- ===================================================================== -->
+
+  <rule id="100110" level="12">
+    <if_sid>100100</if_sid>
+    <field name="SYSCALL.key">^auditlog$</field>
+    <description>LAUREL: audit log directory accessed or modified -- possible evidence tampering.</description>
+    <group>laurel,audit_tampering,</group>
+    <mitre>
+      <id>T1070</id>
+      <id>T1070.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Whitelist: wazuh-logcollector reading audit.log is normal agent operation -->
+  <rule id="100114" level="0">
+    <if_sid>100110</if_sid>
+    <field name="SYSCALL.exe">/var/ossec/bin/wazuh-logcollector$</field>
+    <description>LAUREL: audit log access by wazuh-logcollector (whitelisted).</description>
+    <group>laurel,audit_tampering,</group>
+  </rule>
+
+  <!-- The /var/log/audit watch includes read, so every ausearch run alerted at
+       level 12 and tripped 100351. Reads by anything else still hit the parent.
+       Outside audit_tampering so it does not feed the composite rule. -->
+  <rule id="100115" level="3">
+    <if_sid>100110</if_sid>
+    <field name="SYSCALL.exe">/sbin/ausearch$|/sbin/aureport$|/sbin/aulast$|/sbin/auvirt$|/sbin/augenrules$|/sbin/auditctl$</field>
+    <description>LAUREL: audit log read by an audit tool (expected administrative access).</description>
+    <group>laurel,audit_access,</group>
+  </rule>
+
+  <rule id="100111" level="12">
+    <if_sid>100100</if_sid>
+    <field name="SYSCALL.key">^auditconfig$</field>
+    <description>LAUREL: audit configuration modified -- detection coverage may be altered.</description>
+    <group>laurel,audit_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <!-- The audittools watches sit before the execve rule in audit.rules, so this
+       key does survive. Matched on comm, not exe: augenrules and friends are
+       shell scripts, where exe= is the interpreter. -->
+  <rule id="100112" level="10">
+    <if_sid>100100</if_sid>
+    <field name="SYSCALL.key">^audittools$</field>
+    <description>LAUREL: audit management tool executed (auditctl/ausearch/aureport).</description>
+    <group>laurel,audit_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Same tools when the event was tagged key="exec" instead. -->
+  <rule id="100116" level="10">
+    <if_sid>100120, 100121</if_sid>
+    <field name="SYSCALL.comm">^auditctl$|^auditd$|^augenrules$|^ausearch$|^aureport$|^aulast$|^auvirt$</field>
+    <description>LAUREL: audit management tool executed (auditctl/ausearch/aureport).</description>
+    <group>laurel,audit_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="100117" level="13">
+    <if_sid>100116</if_sid>
+    <field name="SYSCALL.comm">^auditctl$</field>
+    <description>LAUREL: auditctl executed, rules may be flushed or modified at runtime.</description>
+    <group>laurel,audit_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Elevated: auditctl executed specifically (can flush all rules) -->
+  <rule id="100113" level="13">
+    <if_sid>100112</if_sid>
+    <field name="SYSCALL.comm">^auditctl$</field>
+    <description>LAUREL: auditctl executed -- rules may be flushed or modified at runtime.</description>
+    <group>laurel,audit_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+
+  <!-- Audit rule added or removed. LAUREL emits CONFIG_CHANGE as an array, which
+       the JSON decoder keeps as one opaque field, so CONFIG_CHANGE.op is not
+       addressable and <match> on the raw line is the only way in.
+
+       Level 3, and deliberately NOT in the audit_tampering group: one
+       `augenrules` load emits a remove_rule plus an add_rule per rule (~400
+       events for this ruleset), so anything higher alerts on every legitimate
+       reload and would trip rule 100351 on every boot. Raise it, or alert on
+       bursts outside your maintenance windows, once you have a baseline. -->
+  <rule id="100118" level="3">
+    <if_sid>100100</if_sid>
+    <match>"op":"add_rule"|"op":"remove_rule"</match>
+    <description>LAUREL: audit rule added or removed, detection coverage changed.</description>
+    <group>laurel,audit_config_change,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- SECTION 4: COMMAND EXECUTION                                          -->
+  <!-- Keys: exec, exec_root_unattributed, priv_esc                         -->
+  <!-- ===================================================================== -->
+
   <!-- Privilege escalation binary executed -->
   <!-- Note: specific audit keys like "priv_esc" are shadowed by the broad     -->
   <!-- execve rule (key="exec") when auid>=1000. Match on SYSCALL.exe instead. -->
-  <rule id="100130" level="8">
-    <if_sid>100100</if_sid>
+
+  <!-- Level 5: sudo runs constantly on an administered host. The pkexec and
+       dbus-send children keep their high levels. -->
+  <rule id="100130" level="5">
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.exe">/bin/su$|/bin/sudo$|/bin/pkexec$|/bin/dbus-send$</field>
     <description>LAUREL: privilege escalation binary executed (su/sudo/pkexec/dbus-send).</description>
     <group>laurel,privilege_escalation,</group>
@@ -178,12 +253,24 @@
   <!-- ===================================================================== -->
 
   <rule id="100140" level="5">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.exe">/bin/systemctl$</field>
     <description>LAUREL: systemctl executed -- service state change.</description>
     <group>laurel,service_management,</group>
     <mitre>
       <id>T1569.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Power verb via systemctl. match scans the raw JSON line (argv included),
+       so it does not depend on the exact field path. -->
+  <rule id="100274" level="8">
+    <if_sid>100140</if_sid>
+    <match>"poweroff"|"reboot"|"halt"|"shutdown"</match>
+    <description>LAUREL: system power command executed via systemctl (shutdown/reboot/halt/poweroff).</description>
+    <group>laurel,system_state,</group>
+    <mitre>
+      <id>T1529</id>
     </mitre>
   </rule>
 
@@ -243,7 +330,7 @@
   <rule id="100161" level="13">
     <if_sid>100160</if_sid>
     <field name="SYSCALL.exe" negate="yes">/sbin/useradd$|/sbin/userdel$|/sbin/usermod$|/bin/passwd$|/bin/chage$</field>
-    <match>shadow</match>
+    <match>/etc/shadow</match>
     <description>LAUREL: /etc/shadow modified by unexpected process -- possible credential manipulation.</description>
     <group>laurel,account_manipulation,credential_access,</group>
     <mitre>
@@ -429,8 +516,8 @@
   <!-- Keys: user_mgmt, group_mgmt                                          -->
   <!-- ===================================================================== -->
 
-  <rule id="100200" level="8">
-    <if_sid>100100</if_sid>
+  <rule id="100180" level="8">
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.exe">/sbin/useradd$|/sbin/userdel$|/sbin/usermod$|/sbin/adduser$|/bin/passwd$|/bin/chage$|/bin/chfn$</field>
     <description>LAUREL: user management tool executed (useradd/userdel/usermod/passwd/chage/chfn).</description>
     <group>laurel,account_manipulation,</group>
@@ -440,8 +527,8 @@
     </mitre>
   </rule>
 
-  <rule id="100201" level="8">
-    <if_sid>100100</if_sid>
+  <rule id="100181" level="8">
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.exe">/sbin/groupadd$|/sbin/groupmod$|/sbin/groupdel$|/sbin/addgroup$</field>
     <description>LAUREL: group management tool executed (groupadd/groupmod/groupdel).</description>
     <group>laurel,account_manipulation,</group>
@@ -500,7 +587,7 @@
   <!-- ===================================================================== -->
 
   <rule id="100230" level="10">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.exe">/sbin/iptables$|/sbin/ip6tables$|/sbin/nft$|/sbin/xtables-nft-multi$|/sbin/arptables$|/sbin/ebtables$</field>
     <description>LAUREL: firewall management tool executed (iptables/nft/ebtables).</description>
     <group>laurel,firewall,</group>
@@ -511,7 +598,7 @@
 
   <!-- ufw is a Python script: SYSCALL.exe is the interpreter, so match comm -->
   <rule id="100235" level="10">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.comm">^ufw$</field>
     <description>LAUREL: firewall management tool executed (ufw).</description>
     <group>laurel,firewall,</group>
@@ -521,7 +608,7 @@
   </rule>
 
   <rule id="100231" level="8">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120</if_sid>
     <field name="SYSCALL.exe">/sbin/tcpdump$|/sbin/traceroute$|/bin/netstat$|/bin/ss$|/bin/nc$|/bin/nc\.openbsd$</field>
     <description>LAUREL: network reconnaissance or packet capture tool executed.</description>
     <group>laurel,reconnaissance,</group>
@@ -573,7 +660,7 @@
   <!-- ===================================================================== -->
 
   <rule id="100250" level="6">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120</if_sid>
     <field name="SYSCALL.exe">/bin/wget$|/bin/curl$|/bin/scp$|/bin/sftp$|/bin/ftp$|/bin/rsync$|/bin/base64$</field>
     <description>LAUREL: data transfer tool executed (curl/wget/scp/sftp/rsync/base64).</description>
     <group>laurel,exfiltration,</group>
@@ -596,7 +683,7 @@
   </rule>
 
   <rule id="100252" level="4">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120</if_sid>
     <field name="SYSCALL.exe">/bin/zip$|/bin/gzip$|/bin/bzip2$|/bin/tar$|/bin/zstd$|/bin/xz$</field>
     <description>LAUREL: compression/archival tool executed (tar/gzip/zip/xz/zstd).</description>
     <group>laurel,exfiltration,</group>
@@ -605,8 +692,9 @@
     </mitre>
   </rule>
 
-  <!-- Frequency: transfer tool shortly after compression = exfil staging -->
-  <rule id="100253" level="12" frequency="2" timeframe="300">
+  <!-- Repeated transfer-tool use in a short window: exfil staging.
+       Was 2 in 300s, which two routine curl calls satisfied. -->
+  <rule id="100253" level="12" frequency="6" timeframe="300">
     <if_matched_sid>100250</if_matched_sid>
     <description>LAUREL: multiple data transfer tools executed in short window -- possible active exfiltration.</description>
     <group>laurel,exfiltration,</group>
@@ -623,7 +711,7 @@
   <!-- ===================================================================== -->
 
   <rule id="100260" level="5">
-    <if_sid>100100</if_sid>
+    <if_sid>100100, 100120</if_sid>
     <field name="SYSCALL.exe">/bin/whoami$|/bin/id$|/bin/hostname$|/bin/uname$|/bin/uptime$|/bin/w$|/bin/last$</field>
     <description>LAUREL: reconnaissance tool executed (whoami/id/hostname/uname/w/last).</description>
     <group>laurel,reconnaissance,</group>
@@ -634,7 +722,8 @@
   </rule>
 
   <!-- Frequency: burst of recon tools = enumeration phase post compromise -->
-  <rule id="100261" level="10" frequency="4" timeframe="120">
+  <!-- Was 4 in 120s, which shell startup files and prompts hit on login alone. -->
+  <rule id="100261" level="10" frequency="10" timeframe="120">
     <if_matched_sid>100260</if_matched_sid>
     <description>LAUREL: rapid succession of reconnaissance tools -- probable post-compromise enumeration.</description>
     <group>laurel,reconnaissance,</group>
@@ -645,8 +734,28 @@
     </mitre>
   </rule>
 
-  <rule id="100262" level="4">
+  <!-- recon via the /etc/issue and /etc/hostname read watches rather than a
+       binary execution. -->
+  <rule id="100263" level="5">
     <if_sid>100100</if_sid>
+    <field name="SYSCALL.key">^recon$</field>
+    <description>LAUREL: host fingerprinting file read (/etc/issue, /etc/hostname).</description>
+    <group>laurel,reconnaissance,</group>
+    <mitre>
+      <id>T1082</id>
+    </mitre>
+  </rule>
+
+  <!-- Whitelist: syscollector reads /etc/issue on every inventory scan. -->
+  <rule id="100264" level="0">
+    <if_sid>100263</if_sid>
+    <field name="SYSCALL.exe">^/var/ossec/bin/</field>
+    <description>LAUREL: host fingerprinting file read by Wazuh agent (whitelisted).</description>
+    <group>laurel,reconnaissance,</group>
+  </rule>
+
+  <rule id="100262" level="4">
+    <if_sid>100100, 100120</if_sid>
     <field name="SYSCALL.exe">/bin/python3|/bin/perl$</field>
     <description>LAUREL: script interpreter executed (python3/perl).</description>
     <group>laurel,execution,</group>
@@ -661,9 +770,12 @@
   <!-- Keys: power, kexec, mknod, mount                                     -->
   <!-- ===================================================================== -->
 
+  <!-- Matches exe for the same reason as 100112. On systemd hosts these paths
+       are symlinks to systemctl, so rule 100274 covers that case via argv;
+       this rule still fires where they are real binaries. -->
   <rule id="100270" level="8">
-    <if_sid>100100</if_sid>
-    <field name="SYSCALL.key">^power$</field>
+    <if_sid>100100, 100120, 100121</if_sid>
+    <field name="SYSCALL.exe">/sbin/shutdown$|/sbin/poweroff$|/sbin/reboot$|/sbin/halt$</field>
     <description>LAUREL: system power command executed (shutdown/reboot/halt/poweroff).</description>
     <group>laurel,system_state,</group>
     <mitre>
@@ -722,6 +834,16 @@
     </mitre>
   </rule>
 
+
+  <!-- Whitelist: the agent writes here itself (merged.mg on group-config push,
+       queue/sockets on start, var/upgrade during WPK upgrades). -->
+  <rule id="100310" level="0">
+    <if_sid>100300</if_sid>
+    <field name="SYSCALL.exe">^/var/ossec/bin/</field>
+    <description>LAUREL: Wazuh configuration write by Wazuh agent process (whitelisted).</description>
+    <group>laurel,wazuh_tampering,</group>
+  </rule>
+
   <rule id="100301" level="14">
     <if_sid>100100</if_sid>
     <field name="SYSCALL.key">^wazuh_keys$</field>
@@ -744,20 +866,34 @@
     </mitre>
   </rule>
 
-  <rule id="100303" level="12">
-    <if_sid>100100</if_sid>
+
+  <!-- Whitelist: the agent writes here itself (merged.mg on group-config push,
+       queue/sockets on start, var/upgrade during WPK upgrades). -->
+  <rule id="100311" level="0">
+    <if_sid>100302</if_sid>
+    <field name="SYSCALL.exe">^/var/ossec/bin/</field>
+    <description>LAUREL: Wazuh binary or upgrade staging write by Wazuh agent process (whitelisted).</description>
+    <group>laurel,wazuh_tampering,</group>
+  </rule>
+
+  <!-- systemd runs wazuh-control on every legitimate agent restart, so this is
+       not an alert on its own. Outside wazuh_tampering so it does not feed
+       100350; the child below carries the severity. -->
+  <rule id="100303" level="5">
+    <if_sid>100100, 100120, 100121</if_sid>
     <field name="SYSCALL.comm">^wazuh-control$|^agent-auth$|^manage_agents$</field>
     <description>LAUREL: Wazuh control script or enrollment tool executed.</description>
-    <group>laurel,wazuh_tampering,</group>
+    <group>laurel,wazuh_control,</group>
     <mitre>
       <id>T1562.001</id>
     </mitre>
   </rule>
 
-  <!-- Elevated: wazuh-control with stop argument -->
-  <rule id="100304" level="14">
+  <!-- Elevated: wazuh-control with "stop". Quoted to match a JSON argv element
+       rather than any path containing the word. -->
+  <rule id="100304" level="12">
     <if_sid>100303</if_sid>
-    <match>stop</match>
+    <match>"stop"</match>
     <description>LAUREL: Wazuh agent stop command detected -- agent may be silenced.</description>
     <group>laurel,wazuh_tampering,</group>
     <mitre>
@@ -774,6 +910,16 @@
       <id>T1562.001</id>
       <id>T1574.006</id>
     </mitre>
+  </rule>
+
+
+  <!-- Whitelist: the agent writes here itself (merged.mg on group-config push,
+       queue/sockets on start, var/upgrade during WPK upgrades). -->
+  <rule id="100312" level="0">
+    <if_sid>100305</if_sid>
+    <field name="SYSCALL.exe">^/var/ossec/bin/</field>
+    <description>LAUREL: Wazuh library write by Wazuh agent process (whitelisted).</description>
+    <group>laurel,wazuh_tampering,</group>
   </rule>
 
   <rule id="100306" level="12">
@@ -853,10 +999,10 @@
     </mitre>
   </rule>
 
-  <!-- Recon followed by privilege escalation = classic post-exploit pattern -->
-  <rule id="100353" level="12" frequency="2" timeframe="300">
+  <!-- Was 2 in 300s, which any admin running two sudo commands matched. -->
+  <rule id="100353" level="10" frequency="10" timeframe="300">
     <if_matched_group>privilege_escalation</if_matched_group>
-    <description>LAUREL: multiple privilege escalation attempts in 5 minutes.</description>
+    <description>LAUREL: repeated privilege escalation activity in 5 minutes.</description>
     <group>laurel,privilege_escalation,</group>
     <mitre>
       <id>T1548</id>

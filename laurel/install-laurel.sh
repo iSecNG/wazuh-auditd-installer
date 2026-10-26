@@ -31,12 +31,17 @@ else
         fi
         "$@"
     }
+    run_ok() { run "$@" || true; }
+    nap() { [[ "${DRY_RUN:-false}" == "true" ]] || sleep "$1"; }
 fi
 
 # ---------------------------------------------------------------------------
 # Settings — globals so the EXIT trap can reference them after the function returns
 # ---------------------------------------------------------------------------
 _LAUREL_REPO="https://github.com/threathunters-io/laurel.git"
+# Revision to build; defaults to the highest release tag on the remote.
+# Set LAUREL_VERSION to pin one. Building the branch tip was not reproducible.
+_LAUREL_VERSION="${LAUREL_VERSION:-}"
 _LAUREL_USER="_laurel"
 _LAUREL_BIN="/usr/local/sbin/laurel"
 _LAUREL_CONF_DIR="/etc/laurel"
@@ -49,6 +54,15 @@ _laurel_cleanup() {
         info "Cleaning up build directory ${_LAUREL_BUILD_DIR}"
         rm -rf "${_LAUREL_BUILD_DIR}"
     fi
+}
+
+# Highest semver release tag on the remote, e.g. "v0.6.3".
+_laurel_latest_tag() {
+    git ls-remote --tags --refs "${_LAUREL_REPO}" 2>/dev/null \
+        | awk -F/ '{print $NF}' \
+        | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+        | sort -V \
+        | tail -1
 }
 
 # ---------------------------------------------------------------------------
@@ -68,10 +82,18 @@ install_laurel() {
         return 0
     fi
 
+    # LAUREL only runs as an auditd plugin.
+    if ! command -v auditctl >/dev/null 2>&1; then
+        warn "auditd is not installed — skipping LAUREL."
+        warn "Install auditd (drop --skip-auditd) and re-run, or install LAUREL with:"
+        warn "  sudo bash laurel/install-laurel.sh"
+        return 0
+    fi
+
     # Detect auditd version to select the correct plugin directory.
     # auditd 3.x uses /etc/audit/plugins.d/; auditd 2.x uses /etc/audisp/plugins.d/.
     local auditd_major plugin_dir
-    auditd_major=$(auditctl -v 2>/dev/null | grep -oP '\d+' | head -1 || echo "3")
+    auditd_major=$(auditctl -v 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "3")
     if (( auditd_major >= 3 )); then
         plugin_dir="/etc/audit/plugins.d"
     else
@@ -105,8 +127,18 @@ install_laurel() {
     ok "Build dependencies ready  (rustc $(rustc --version | awk '{print $2}'))"
 
     # Step 2: clone and build
-    info "Cloning LAUREL repository into ${_LAUREL_BUILD_DIR} ..."
-    git clone --quiet --depth 1 "${_LAUREL_REPO}" "${_LAUREL_BUILD_DIR}"
+    if [[ -z "${_LAUREL_VERSION}" ]]; then
+        info "Resolving latest LAUREL release tag ..."
+        _LAUREL_VERSION="$(_laurel_latest_tag)"
+        [[ -n "${_LAUREL_VERSION}" ]] \
+            || die "Could not resolve a LAUREL release tag — set LAUREL_VERSION explicitly."
+    fi
+
+    info "Cloning LAUREL ${_LAUREL_VERSION} into ${_LAUREL_BUILD_DIR} ..."
+    git clone --quiet --depth 1 --branch "${_LAUREL_VERSION}" \
+        "${_LAUREL_REPO}" "${_LAUREL_BUILD_DIR}" \
+        || die "Clone of ${_LAUREL_REPO} at ${_LAUREL_VERSION} failed."
+    ok "Building LAUREL ${_LAUREL_VERSION}  (commit $(git -C "${_LAUREL_BUILD_DIR}" rev-parse --short HEAD))"
 
     info "Building release binary (this may take a few minutes) ..."
     pushd "${_LAUREL_BUILD_DIR}" >/dev/null
@@ -122,9 +154,18 @@ install_laurel() {
         ok "System user '${_LAUREL_USER}' already exists"
     else
         info "Creating system user '${_LAUREL_USER}' ..."
-        useradd --system --home-dir "${_LAUREL_LOG_DIR}" --create-home "${_LAUREL_USER}"
+        # No --create-home: it copies /etc/skel into the log directory and
+        # leaves .bashrc/.profile there. nologin: this account never logs in.
+        useradd --system --no-create-home --home-dir "${_LAUREL_LOG_DIR}" \
+            --shell /usr/sbin/nologin "${_LAUREL_USER}"
     fi
+    # LAUREL resets this directory to 0755 itself at runtime, so 0750 only
+    # covers the window before it starts. The log files it writes are 0640
+    # _laurel:_laurel, so the contents stay unreadable to other users either way.
     install -d -o "${_LAUREL_USER}" -g "${_LAUREL_USER}" -m 0750 "${_LAUREL_LOG_DIR}"
+    # Clean up skel files left by an earlier --create-home install.
+    rm -f "${_LAUREL_LOG_DIR}/.bashrc" "${_LAUREL_LOG_DIR}/.profile" \
+          "${_LAUREL_LOG_DIR}/.bash_logout"
 
     # Step 4: install binary
     info "Installing binary to ${_LAUREL_BIN} ..."
@@ -200,7 +241,7 @@ PLUGIN
     # Step 7: reload auditd to pick up the new plugin
     info "Signalling auditd to reload configuration ..."
     pkill -HUP auditd || true
-    sleep 2
+    nap 2
 
     if pgrep -x laurel >/dev/null 2>&1; then
         ok "LAUREL is running  (pid $(pgrep -x laurel | head -1))"

@@ -10,11 +10,21 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 die()     { echo -e "${RED}[FATAL]${NC} $*" >&2; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}=== $* ===${NC}"; }
 
-# Executes a command, or prints it in dry-run mode.
+# Executes a command, prints it in dry-run mode, echoes it first when verbose.
 run() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         echo -e "${YELLOW}[DRY-RUN]${NC} $*" >&2
         return 0
     fi
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+        echo -e "${CYAN}[RUN]${NC}   $*" >&2
+    fi
     "$@"
 }
+
+# Like run(), but a non-zero exit is not fatal under `set -e`.
+# Use for best-effort cleanup steps (pkill, repo refresh, ...).
+run_ok() { run "$@" || true; }
+
+# sleep that is skipped in dry-run mode.
+nap() { [[ "${DRY_RUN:-false}" == "true" ]] || sleep "$1"; }
