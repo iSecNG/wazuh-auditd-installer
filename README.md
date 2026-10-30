@@ -97,6 +97,19 @@ Then confirm the field paths against a real event, by pasting one line of `/var/
 
 The rules assume LAUREL emits `SYSCALL.key` as a plain string and that `SYSCALL.exe`, `SYSCALL.comm` and `SYSCALL.tty` exist. If your LAUREL version differs, adjust the anchored regexes in `wazuh/rules/laurel_rules.xml`.
 
+### Collecting the LAUREL log through centralized configuration
+
+LAUREL logs JSON to `/var/log/laurel/audit.log`. To collect it centrally, add this to `/var/ossec/etc/shared/<group>/agent.conf` and remove the installer's block from each agent's `ossec.conf`:
+
+```xml
+<agent_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/laurel/audit.log</location>
+  </localfile>
+</agent_config>
+```
+
 ## What the rules cover
 
 The auditd ruleset and Wazuh detection rules cover: interactive command logging, privilege escalation, service/cron/kernel module changes, credential file access, SSH/PAM/sudoers modifications, SSL key access, network and firewall changes, time manipulation, DAC permission changes, data exfiltration indicators, reconnaissance tools, and Wazuh agent integrity monitoring. MITRE ATT&CK technique IDs are mapped throughout. Syscall rules are duplicated for `b32` so a 32-bit process on a 64-bit host cannot bypass them.
