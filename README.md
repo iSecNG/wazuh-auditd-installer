@@ -80,14 +80,16 @@ LAUREL is compiled from source, which installs a Rust toolchain via `rustup` whe
 
 ## Manager-side setup
 
-Deploy the Wazuh decoder and rules to your **Wazuh manager**, with the ownership the manager expects:
+Deploy the Wazuh rules to your **Wazuh manager**, with the ownership the manager expects:
 
 ```bash
-install -o wazuh -g wazuh -m 0660 wazuh/decoders/laurel_decoder.xml /var/ossec/etc/decoders/
-install -o wazuh -g wazuh -m 0660 wazuh/rules/laurel_rules.xml      /var/ossec/etc/rules/
+install -o wazuh -g wazuh -m 0660 wazuh/rules/223000-det-laurel-generic.xml   /var/ossec/etc/rules/
+install -o wazuh -g wazuh -m 0660 wazuh/rules/224000-excl-laurel-generic.xml  /var/ossec/etc/rules/
 /var/ossec/bin/wazuh-logtest -t      # verify the ruleset loads before restarting
 systemctl restart wazuh-manager
 ```
+
+Keep the numeric filename prefixes. The manager loads `etc/rules/` in filename order, and the exclusions in `224000-excl-laurel-generic.xml` reference the `223xxx` detection rules as parents via `<if_sid>`, which must already be loaded.
 
 Then confirm the field paths against a real event, by pasting one line of `/var/log/laurel/audit.log` into `wazuh-logtest`:
 
@@ -95,7 +97,7 @@ Then confirm the field paths against a real event, by pasting one line of `/var/
 /var/ossec/bin/wazuh-logtest
 ```
 
-The rules assume LAUREL emits `SYSCALL.key` as a plain string and that `SYSCALL.exe`, `SYSCALL.comm` and `SYSCALL.tty` exist. If your LAUREL version differs, adjust the anchored regexes in `wazuh/rules/laurel_rules.xml`.
+The rules assume LAUREL emits `SYSCALL.key` as a plain string and that `SYSCALL.exe`, `SYSCALL.comm` and `SYSCALL.tty` exist. If your LAUREL version differs, adjust the anchored regexes in `wazuh/rules/223000-det-laurel-generic.xml`.
 
 ### Collecting the LAUREL log through centralized configuration
 
@@ -116,11 +118,12 @@ The auditd ruleset and Wazuh detection rules cover: interactive command logging,
 
 ### Tuning before production
 
-Levels and the `frequency`/`timeframe` values in `laurel_rules.xml` are starting points, not measurements:
+Levels and the `frequency`/`timeframe` values in `223000-det-laurel-generic.xml` are starting points, not measurements:
 
-- Rule `100122` alerts at level 3 on **every** interactive command. It dominates alert volume; that is the intent, but size your indexer for it.
-- The composite rules `100350`–`100353` fire on bursts. Baseline them against your own hosts first.
-- Rule order in `laurel_rules.xml` is load-bearing. The broad `exec` catch-alls sit at the end of the file on purpose; `analysisd` keeps the first matching child of a parent rule, so moving them up disables every `exe`-matching rule above them.
+- Rule `223122` alerts at level 3 on **every** interactive command (anything with a TTY attached). It dominates alert volume; that is the intent, but size your indexer for it.
+- The composite rules `223350`–`223353` fire on bursts. Baseline them against your own hosts first.
+- Rule order inside `223000-det-laurel-generic.xml` is load-bearing. The broad `exec` catch-alls sit at the end of the file on purpose; `analysisd` keeps the first matching child of a parent rule, so moving them up disables every `exe`-matching rule above them.
+- `224000-excl-laurel-generic.xml` holds the whitelists for Wazuh's own agent processes (`wazuh-syscheckd` FIM scans, `wazuh-modulesd` SCA checks, active-response scripts) and for the netplan systemd generator. Without it, the agent's normal activity trips the audit-tampering rules. Add your own environment's noise here rather than editing the detection file, so the two stay separable on update.
 
 The ruleset deliberately leaves `-e 2` (immutable rules) commented out in `auditd/rules/audit.rules`. Enable it once the ruleset is stable — afterwards rule changes need a reboot.
 

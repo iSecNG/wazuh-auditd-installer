@@ -980,8 +980,12 @@
   </rule>
 
   <!-- Multiple persistence mechanisms touched in short window -->
-  <rule id="223352" level="13" frequency="3" timeframe="600">
+  <!-- One crontab or unit edit is several syscalls with the same key, so count
+       only events whose key differs from the current one. frequency="2" means
+       one earlier event with another key, i.e. any two mechanisms in any order. -->
+  <rule id="223352" level="13" frequency="2" timeframe="600">
     <if_matched_group>persistence</if_matched_group>
+    <different_field>SYSCALL.key</different_field>
     <description>LAUREL: multiple persistence mechanisms modified in 10 minutes, possible multi-vector persistence installation.</description>
     <group>laurel,persistence,</group>
     <mitre>

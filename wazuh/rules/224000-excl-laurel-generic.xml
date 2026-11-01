@@ -1,0 +1,68 @@
+<group name="laurel,">
+
+  <!-- wazuh-syscheckd walks /var/log/audit during FIM scans (read-only openat).
+       Kept out of audit_tampering so it does not feed composite rule 223351. -->
+  <rule id="224000" level="0">
+    <if_sid>223110</if_sid>
+    <field name="SYSCALL.exe" type="pcre2">^/var/ossec/bin/wazuh-syscheckd$</field>
+    <description>LAUREL: audit log access by wazuh-syscheckd (whitelisted).</description>
+    <group>laurel,audit_access,</group>
+  </rule>
+
+  <!-- wazuh-modulesd lists audit rules (auditctl -l) to verify the whodata
+       watches. Only the read-only -l call is whitelisted; anything that adds
+       or flushes rules still hits 223113. -->
+  <rule id="224001" level="0">
+    <if_sid>223113</if_sid>
+    <field name="SYSCALL.exe" type="pcre2">^/usr/sbin/auditctl$</field>
+    <field name="SYSCALL.SPAWNED_BY.exe" type="pcre2">^/var/ossec/bin/wazuh-modulesd$</field>
+    <!-- Wazuh flattens the JSON array to its text form: ["auditctl", "-l"] -->
+    <field name="EXECVE.ARGV" type="pcre2">^\["auditctl", "-l"\]$</field>
+    <description>LAUREL: auditctl -l run by wazuh-modulesd (whitelisted).</description>
+    <group>laurel,audit_access,</group>
+  </rule>
+
+  <!-- Active-response scripts (restart.sh etc.) run as a shell under
+       wazuh-execd and write active-responses.log. 223309 only covers
+       /var/ossec/bin/ binaries. Script tampering still hits 223307. -->
+  <rule id="224002" level="3">
+    <if_sid>223306</if_sid>
+    <field name="SYSCALL.SPAWNED_BY.exe" type="pcre2">^/var/ossec/bin/wazuh-execd$</field>
+    <description>LAUREL: Wazuh log access by active-response script (whitelisted).</description>
+    <group>laurel,wazuh_log_access,</group>
+  </rule>
+
+  <!-- The netplan systemd generator rewrites its drop-ins under /run/systemd
+       (tmpfs) on every boot and daemon-reload. -->
+  <rule id="224003" level="3">
+    <if_sid>223141</if_sid>
+    <field name="SYSCALL.exe" type="pcre2">^/usr/libexec/netplan/generate$</field>
+    <field name="SYSCALL.SPAWNED_BY.exe" type="pcre2">^/usr/lib/systemd/systemd$</field>
+    <description>LAUREL: systemd unit drop-in written by netplan generator (whitelisted).</description>
+    <group>laurel,service_generator,</group>
+  </rule>
+
+  <!-- The FIM scanner probes each watched path with openat(O_DIRECTORY); on a
+       regular file that returns ENOTDIR, so every scan pass produces a batch of
+       access_denied events and trips frequency rule 223175. Denied access by
+       anything other than wazuh-syscheckd still hits 223174 at level 8. -->
+  <rule id="224004" level="3">
+    <if_sid>223174</if_sid>
+    <field name="SYSCALL.exe" type="pcre2">^/var/ossec/bin/wazuh-syscheckd$</field>
+    <description>LAUREL: failed file access by wazuh-syscheckd FIM scan (whitelisted).</description>
+    <group>laurel,fim_access,</group>
+  </rule>
+
+  <!-- The SCA module shells out to find/findmnt against /var/log/audit on every
+       scan cycle for the CIS auditd checks. That is several audit_tampering events
+       per cycle, which trips composite rule 223351. Scoped to children of
+       wazuh-modulesd; audit log access by anything else still hits 223110 at
+       level 12. Outside audit_tampering so it does not feed 223351. -->
+  <rule id="224005" level="3">
+    <if_sid>223110</if_sid>
+    <field name="SYSCALL.SPAWNED_BY.exe" type="pcre2">^/var/ossec/bin/wazuh-modulesd$</field>
+    <description>LAUREL: audit log access by a wazuh-modulesd SCA check (whitelisted).</description>
+    <group>laurel,audit_access,</group>
+  </rule>
+
+</group>
