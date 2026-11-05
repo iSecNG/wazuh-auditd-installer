@@ -1,0 +1,28 @@
+---
+- name: Deploy ossec.conf (custom template if set, else built-in minimal one)
+  ansible.builtin.template:
+    src: "{{ wazuh_custom_config_template or 'ossec.conf.j2' }}"
+    dest: /var/ossec/etc/ossec.conf
+    owner: root
+    group: wazuh
+    mode: "0640"
+    # This REPLACES ossec.conf wholesale. On a host the shell installer set up,
+    # the package default (syscheck, rootcheck, SCA) and its appended sensor
+    # blocks are what gets replaced, so keep a copy to roll back to.
+    backup: true
+  notify: Restart wazuh-agent
+
+- name: Copy registration certificates
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: wazuh
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: "{{ wazuh_agent_cert_src }}", dest: "{{ wazuh_agent_cert_dest }}", mode: "0640" }
+    - { src: "{{ wazuh_agent_key_src }}", dest: "{{ wazuh_agent_key_dest }}", mode: "0600" }
+    - { src: "{{ wazuh_manager_ca_src }}", dest: "{{ wazuh_manager_ca_dest }}", mode: "0640" }
+  loop_control:
+    label: "{{ item.dest }}"
+  when: wazuh_registration_method == "certificate"

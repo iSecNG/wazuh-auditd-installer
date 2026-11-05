@@ -1,0 +1,32 @@
+---
+# Test inventory template.
+# Copy to hosts-test.yml and adjust values before use:
+#
+#   cp inventory/hosts-test.yml.template inventory/hosts-test.yml
+#
+# hosts-test.yml is gitignored and must not be committed.
+
+all:
+  children:
+    wazuh_agents:
+      hosts:
+
+        # --- Docker test nodes (Option A) ---
+        agent-deb:
+          ansible_host: 127.0.0.1
+          ansible_port: 2221
+          ansible_user: root
+
+        agent-rpm:
+          ansible_host: 127.0.0.1
+          ansible_port: 2222
+          ansible_user: root
+
+        # --- VM test nodes (Option B) ---
+        # agent-deb-vm:
+        #   ansible_host: 192.168.100.10
+        #   ansible_user: <user>
+        #
+        # agent-rpm-vm:
+        #   ansible_host: 192.168.100.11
+        #   ansible_user: <user>

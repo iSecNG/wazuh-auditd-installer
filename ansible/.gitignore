@@ -1,0 +1,32 @@
+# SSH keys for test containers (copy from authorized_keys_template)
+test/authorized_keys
+
+# Ansible Vault password files
+.vault_pass
+.vault_password
+vault_pass
+vault_password
+
+# Vault variable files with plaintext secrets
+inventory/vault.yml
+inventory/group_vars/vault.yml
+inventory/host_vars/*/vault.yml
+
+# TLS certificates and private keys
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+roles/wazuh_agent/files/certs/
+
+# Wazuh agent binaries (large, distribute separately)
+roles/wazuh_agent/files/binaries/**/*.deb
+roles/wazuh_agent/files/binaries/**/*.rpm
+
+# Local test inventory (may contain real host addresses)
+inventory/hosts-test.yml
+
+# Ansible runtime artifacts
+*.retry

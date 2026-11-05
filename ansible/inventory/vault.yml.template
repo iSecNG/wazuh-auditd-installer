@@ -1,0 +1,16 @@
+---
+# Ansible Vault secrets template.
+# Copy to vault.yml and encrypt it:
+#
+#   cp inventory/vault.yml.template inventory/vault.yml
+#   # Fill in the values, then encrypt:
+#   ansible-vault encrypt inventory/vault.yml
+#
+# Or encrypt individual strings and paste them into group_vars:
+#
+#   ansible-vault encrypt_string 'mysecret' --name wazuh_registration_password
+#
+# vault.yml is gitignored and must not be committed unencrypted.
+
+# Registration password (used when wazuh_registration_method: password)
+wazuh_registration_password: "<your-registration-password>"

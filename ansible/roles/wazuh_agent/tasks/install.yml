@@ -1,0 +1,54 @@
+---
+- name: Gather package facts
+  ansible.builtin.package_facts:
+
+- name: Determine installed and target package
+  ansible.builtin.set_fact:
+    # deb reports "4.14.9-1" as version; rpm splits it into version "4.14.9" + release "1"
+    wazuh_agent_installed_version: >-
+      {%- set pkg = (ansible_facts.packages['wazuh-agent'] | default([{}]))[0] -%}
+      {{ pkg.version | default('') }}{{ ('-' ~ pkg.release) if pkg.release is defined else '' }}
+    wazuh_binary_filename: >-
+      {{ ('wazuh-agent_%s_amd64.deb' if ansible_facts.os_family == 'Debian'
+          else 'wazuh-agent-%s.x86_64.rpm') | format(wazuh_agent_version) }}
+
+# ponytail: --check can't simulate past a package that isn't on the host yet; full diff once installed.
+- name: "Dry run: agent package would be installed, skipping remaining steps"
+  ansible.builtin.meta: end_host
+  when:
+    - ansible_check_mode
+    - wazuh_agent_installed_version != wazuh_agent_version
+
+- name: Install Wazuh agent {{ wazuh_agent_version }}
+  when: wazuh_agent_installed_version != wazuh_agent_version
+  block:
+    - name: Copy Wazuh agent package to target host
+      ansible.builtin.copy:
+        src: "binaries/{{ 'deb' if ansible_facts.os_family == 'Debian' else 'rpm' }}/{{ wazuh_binary_filename }}"
+        dest: "/tmp/{{ wazuh_binary_filename }}"
+        mode: "0644"
+
+    - name: Install Wazuh agent (Debian/Ubuntu)
+      ansible.builtin.apt:
+        deb: "/tmp/{{ wazuh_binary_filename }}"
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Install Wazuh agent (RedHat)
+      ansible.builtin.dnf:
+        name: "/tmp/{{ wazuh_binary_filename }}"
+        state: present
+        disable_gpg_check: true
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Install Wazuh agent (SUSE)
+      community.general.zypper:
+        name: "/tmp/{{ wazuh_binary_filename }}"
+        state: present
+        disable_gpg_check: true
+      when: ansible_facts.os_family == "Suse"
+
+  always:
+    - name: Remove package from target host
+      ansible.builtin.file:
+        path: "/tmp/{{ wazuh_binary_filename }}"
+        state: absent

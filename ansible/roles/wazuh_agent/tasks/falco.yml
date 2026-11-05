@@ -1,0 +1,150 @@
+---
+- name: Check for kernel BTF
+  ansible.builtin.stat:
+    path: /sys/kernel/btf/vmlinux
+  register: falco_btf
+
+# modern_ebpf is CO-RE: one binary-embedded probe, no compiler and no kernel
+# headers on the host. It needs BTF, i.e. a >= 5.8 kernel built with
+# CONFIG_DEBUG_INFO_BTF. Without that only kmod remains, which DKMS-compiles a
+# module at install time and on every kernel update -- set wazuh_install_falco
+# to false on hosts where that is not acceptable.
+- name: Select Falco driver
+  ansible.builtin.set_fact:
+    falco_driver: "{{ 'modern_ebpf' if falco_modern else 'kmod' }}"
+    falco_unit: "{{ 'falco-modern-bpf.service' if falco_modern else 'falco-kmod.service' }}"
+  vars:
+    falco_modern: "{{ falco_btf.stat.exists and
+                      ansible_facts.kernel.split('-')[0] is version('5.8', '>=') }}"
+
+- name: Warn about the kmod driver
+  ansible.builtin.debug:
+    msg: >-
+      Kernel {{ ansible_facts.kernel }} has no usable BTF; falling back to the
+      'kmod' driver, which needs a compiler and matching kernel headers.
+  when: falco_driver == "kmod"
+
+# install.sh writes this same .list file with signed-by pointing at its own
+# dearmored keyring. Two deb lines for one source with conflicting Signed-By
+# makes apt refuse to read its ENTIRE source list, breaking every apt
+# operation on the host -- so this must not append to what install.sh left.
+# apt_repository does exactly that for a line it does not recognise, hence
+# copy: the file is replaced outright and whichever installer ran last owns
+# it, with a single line. The key stays armored and must therefore be named
+# .asc -- apt only accepts an armored key under that extension and reports
+# NO_PUBKEY for one in a .gpg file -- which in turn keeps gpg off the target.
+- name: Add Falco apt repository
+  when: ansible_facts.os_family == "Debian"
+  block:
+    - name: Install Falco signing key
+      ansible.builtin.get_url:
+        url: "{{ falco_gpg_url }}"
+        dest: /usr/share/keyrings/falcosecurity.asc
+        mode: "0644"
+
+    - name: Add Falco apt source
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/falcosecurity.list
+        content: >-
+          deb [signed-by=/usr/share/keyrings/falcosecurity.asc]
+          https://download.falco.org/packages/deb stable main
+        mode: "0644"
+      register: wazuh_falco_apt_source
+
+    - name: Update apt cache for the Falco repository
+      ansible.builtin.apt:
+        update_cache: true
+      when: wazuh_falco_apt_source is changed
+
+- name: Add Falco rpm repository
+  when: ansible_facts.os_family in ["RedHat", "Suse"]
+  block:
+    - name: Import Falco signing key
+      ansible.builtin.rpm_key:
+        key: "{{ falco_gpg_url }}"
+        state: present
+
+    # Upstream's own .repo file, so baseurl and gpg settings stay as shipped.
+    - name: Add Falco repo definition
+      ansible.builtin.get_url:
+        url: https://falco.org/repo/falcosecurity-rpm.repo
+        dest: "{{ '/etc/zypp/repos.d' if ansible_facts.os_family == 'Suse' else '/etc/yum.repos.d' }}/falcosecurity.repo"
+        mode: "0644"
+
+# The postinst does the driver work itself when these are set:
+#   FALCO_FRONTEND=noninteractive  never show the dialog(1) menu
+#   FALCO_DRIVER_CHOICE=<driver>   configure falcoctl, enable+start the unit
+#   FALCOCTL_ENABLED=no            mask falcoctl-artifact-follow, pinning the
+#                                  ruleset instead of auto-updating it
+# Without FALCO_DRIVER_CHOICE it defaults to "auto" and enables whichever
+# driver falcoctl picks, which is not reproducible across hosts.
+- name: Install falco ({{ falco_driver }})
+  ansible.builtin.package:
+    name: falco
+    state: present
+  environment:
+    FALCO_FRONTEND: noninteractive
+    FALCO_DRIVER_CHOICE: "{{ falco_driver }}"
+    FALCOCTL_ENABLED: "no"
+    DEBIAN_FRONTEND: noninteractive
+
+# Falco writes events.json as root; 0750 keeps the contents away from other
+# local users, since the alerts name paths and command lines.
+- name: Create Falco log directory
+  ansible.builtin.file:
+    path: /var/log/falco
+    state: directory
+    mode: "0750"
+
+- name: Deploy Falco ruleset and config
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - src: "{{ wazuh_installer_repo }}/falco/rules/wazuh-falco-rules.yaml"
+      dest: /etc/falco/rules.d/wazuh-falco-rules.yaml
+      mode: "0640"
+    # zz- prefix: config.d is merged in filename order and falcoctl writes its
+    # own engine-kind-falcoctl.yaml there. Sorting last means our output
+    # settings are not silently overridden.
+    - src: "{{ wazuh_installer_repo }}/falco/falco-local.yaml"
+      dest: /etc/falco/config.d/zz-wazuh.yaml
+      mode: "0640"
+    - src: "{{ wazuh_installer_repo }}/falco/logrotate-falco-wazuh"
+      dest: /etc/logrotate.d/falco-wazuh
+      mode: "0644"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: falco_config
+  notify: Restart falco
+
+# Validate before the handler restarts: a bad ruleset otherwise takes Falco
+# down and the host loses detection entirely. The explicit -c is required --
+# without it `falco --validate` reads a default config path and fails on the
+# config.d drop-in with "Error: bad file" even when the rules are fine.
+- name: Validate Falco ruleset
+  ansible.builtin.command:
+    argv: [falco, -c, /etc/falco/falco.yaml, --validate, /etc/falco/rules.d/wazuh-falco-rules.yaml]
+  changed_when: false
+  register: falco_validate
+  failed_when: '''"successful":true'' not in falco_validate.stdout'
+  when: falco_config is changed
+
+- name: Enable Falco
+  ansible.builtin.systemd:
+    name: "{{ falco_unit }}"
+    state: started
+    enabled: true
+
+# falcoctl-artifact-follow would replace falco_rules.yaml underneath us on its
+# own schedule. FALCOCTL_ENABLED=no makes the postinst mask it; do it here too,
+# in case an earlier manual install left it running.
+- name: Mask falcoctl auto-update
+  ansible.builtin.systemd:
+    name: falcoctl-artifact-follow.service
+    state: stopped
+    masked: true
+  failed_when: false

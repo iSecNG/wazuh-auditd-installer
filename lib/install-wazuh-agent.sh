@@ -6,6 +6,7 @@
 _WAZUH_GPG_URL="https://packages.wazuh.com/key/GPG-KEY-WAZUH"
 _WAZUH_KEYRING="/usr/share/keyrings/wazuh.gpg"
 _OSSEC_CONF="/var/ossec/etc/ossec.conf"
+_CLIENT_KEYS="/var/ossec/etc/client.keys"
 
 # Delimits the block appended to ossec.conf so uninstall can remove just that.
 _LAUREL_LF_BEGIN="<!-- BEGIN wazuh-auditd-installer: LAUREL -->"

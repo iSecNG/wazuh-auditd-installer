@@ -1,0 +1,23 @@
+---
+# install-laurel.sh fetches the release tarball with curl and reports the
+# binary's linkage with file. install.sh gets both as a side effect of its own
+# repo setup; nothing here does, and a minimal Ubuntu/Debian image has neither
+# -- without curl the download silently fails over to a full source build.
+- name: Install LAUREL installer dependencies
+  ansible.builtin.package:
+    name: [curl, ca-certificates, file]
+    state: present
+
+# ponytail: runs this repo's install-laurel.sh instead of re-expressing its
+# pinned-sha download, source-build fallback and plugin-dir detection in YAML.
+# The script is self-contained and idempotent (it exits early if the binary is
+# there); `creates` keeps Ansible from copying and running it on every pass.
+# Port it to native tasks only if LAUREL config needs to be templated per host.
+- name: Install LAUREL
+  ansible.builtin.script:
+    cmd: "{{ wazuh_installer_repo }}/laurel/install-laurel.sh"
+    creates: /usr/local/sbin/laurel
+  environment:
+    LAUREL_VERSION: "{{ laurel_version }}"
+    LAUREL_SHA256: "{{ laurel_sha256 }}"
+    LAUREL_BUILD_FROM_SOURCE: "{{ '1' if laurel_build_from_source else '0' }}"

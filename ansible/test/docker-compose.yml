@@ -1,0 +1,28 @@
+x-systemd: &systemd
+  privileged: true   # systemd needs cgroup write access; test use only
+  cgroup: host
+  tmpfs: [/run, /run/lock, /tmp]
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # reach a manager running on the docker host
+
+services:
+
+  agent-deb:
+    <<: *systemd
+    build:
+      context: .
+      dockerfile: Dockerfile.deb
+    container_name: agent-deb
+    hostname: agent-deb
+    ports:
+      - "2221:22"
+
+  agent-rpm:
+    <<: *systemd
+    build:
+      context: .
+      dockerfile: Dockerfile.rpm
+    container_name: agent-rpm
+    hostname: agent-rpm
+    ports:
+      - "2222:22"

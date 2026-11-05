@@ -1,0 +1,6 @@
+---
+- name: Deploy Wazuh agents
+  hosts: wazuh_agents
+  become: true
+  roles:
+    - wazuh_agent

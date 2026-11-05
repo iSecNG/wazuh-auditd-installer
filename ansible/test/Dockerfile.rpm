@@ -1,0 +1,21 @@
+FROM rockylinux:9
+
+# systemd as PID 1 so the role's service tasks/handlers run like on a real host
+RUN dnf install -y \
+    systemd \
+    openssh-server \
+    procps-ng \
+    python3 \
+    sudo \
+    && dnf clean all
+
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh \
+    && ssh-keygen -A \
+    && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && systemctl enable sshd
+
+COPY --chmod=600 authorized_keys /root/.ssh/authorized_keys
+
+EXPOSE 22
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

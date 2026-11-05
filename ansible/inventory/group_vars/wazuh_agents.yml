@@ -1,0 +1,29 @@
+---
+# Settings for all hosts in wazuh_agents; override per host in inventory/host_vars/<host>.yml
+# or with --extra-vars. All variables are listed in roles/wazuh_agent/defaults/main.yml.
+wazuh_manager_address: "<your-manager-here>"
+wazuh_agent_version: "4.14.9-1"  # must match the package filename in roles/wazuh_agent/files/binaries/
+wazuh_agent_group: "default"
+
+# none | password | certificate
+wazuh_registration_method: "none"
+
+# Sensors — set to false to leave one out
+wazuh_install_auditd: true
+wazuh_install_laurel: true
+wazuh_install_falco: true
+
+# Password: keep it in vault, e.g. ansible-vault encrypt_string 'secret' --name wazuh_registration_password
+# wazuh_registration_password: !vault |
+#   $ANSIBLE_VAULT;1.1;AES256
+#   ...
+
+# Certificate (paths on the control node):
+# wazuh_agent_cert_src: "files/certs/agent.pem"
+# wazuh_agent_key_src:  "files/certs/agent-key.pem"
+# wazuh_manager_ca_src: "files/certs/rootCA.pem"
+
+# Own ossec.conf template instead of the built-in one. Note that the built-in
+# template carries the <localfile> entries for the LAUREL and Falco logs —
+# a custom template has to bring its own.
+# wazuh_custom_config_template: "templates/my_ossec.conf.j2"

@@ -1,0 +1,43 @@
+<!--
+  Minimal ossec.conf managed by Ansible.
+  Override by setting wazuh_custom_config_template to your own template path.
+-->
+<ossec_config>
+
+  <client>
+    <server>
+      <address>{{ wazuh_manager_address }}</address>
+      <port>{{ wazuh_manager_port }}</port>
+      <protocol>tcp</protocol>
+    </server>
+    <config-profile>{{ wazuh_agent_group }}</config-profile>
+    <notify_time>10</notify_time>
+    <time-reconnect>60</time-reconnect>
+    <auto_restart>yes</auto_restart>
+    <crypto_method>aes</crypto_method>
+  </client>
+
+  <client_buffer>
+    <disabled>no</disabled>
+    <queue_size>5000</queue_size>
+    <events_per_second>500</events_per_second>
+  </client_buffer>
+
+{% if wazuh_install_laurel and wazuh_sensor_localfiles %}
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ laurel_log }}</location>
+  </localfile>
+{% endif %}
+{% if wazuh_install_falco and wazuh_sensor_localfiles %}
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ falco_log }}</location>
+  </localfile>
+{% endif %}
+
+  <logging>
+    <log_format>plain</log_format>
+  </logging>
+
+</ossec_config>

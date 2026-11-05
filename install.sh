@@ -159,6 +159,23 @@ if [[ "${DRY_RUN}" != "true" ]]; then
         VERIFY_FAILED=$((VERIFY_FAILED + 1))
     fi
 
+    # A running agent is not an enrolled one: agentd enrols after the service
+    # starts, and if the manager refuses the key it retries indefinitely while
+    # systemd still reports the unit active. An empty client.keys is that
+    # state. Enrolment is asynchronous, hence the bounded poll.
+    for _ in $(seq 1 15); do
+        [[ -s "${_CLIENT_KEYS}" ]] && break
+        sleep 1
+    done
+    if [[ -s "${_CLIENT_KEYS}" ]]; then
+        ok "enrollment   : registered"
+    else
+        warn "agent is NOT enrolled — ${_CLIENT_KEYS} is empty"
+        warn "The agent stays active and keeps retrying, but will not connect."
+        warn "  Reason: tail -20 /var/ossec/logs/ossec.log"
+        VERIFY_FAILED=$((VERIFY_FAILED + 1))
+    fi
+
     if [[ "${SKIP_AUDITD}" != "true" ]]; then
         if systemctl is-active --quiet auditd; then
             ok "auditd       : running"

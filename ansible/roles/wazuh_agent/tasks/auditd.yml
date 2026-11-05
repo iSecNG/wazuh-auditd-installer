@@ -1,0 +1,24 @@
+---
+- name: Install auditd
+  ansible.builtin.package:
+    name: "{{ ['auditd', 'audispd-plugins'] if ansible_facts.os_family == 'Debian' else ['audit'] }}"
+    state: present
+
+# 99- prefix: augenrules concatenates rules.d in filename order, so the "-D"
+# and -b/-f settings in this file must load last. Also leaves the distro's own
+# audit.rules alone.
+- name: Deploy audit ruleset
+  ansible.builtin.copy:
+    src: "{{ wazuh_installer_repo }}/auditd/rules/audit.rules"
+    dest: /etc/audit/rules.d/99-wazuh.rules
+    owner: root
+    group: root
+    mode: "0640"
+    backup: true
+  notify: Load audit rules
+
+- name: Enable and start auditd
+  ansible.builtin.service:
+    name: auditd
+    state: started
+    enabled: true

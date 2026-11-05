@@ -1,0 +1,53 @@
+---
+- name: Check if agent is already registered
+  ansible.builtin.stat:
+    path: /var/ossec/etc/client.keys
+  register: wazuh_client_keys
+
+# agent-auth (and agentd auto-enrollment) read the password from authd.pass,
+# which keeps it out of the process list and lets the command below log errors.
+- name: Deploy registration password
+  ansible.builtin.copy:
+    content: "{{ wazuh_registration_password }}\n"
+    dest: /var/ossec/etc/authd.pass
+    owner: root
+    group: wazuh
+    mode: "0640"
+  no_log: true
+  when: wazuh_registration_method == "password"
+
+# agent-auth would otherwise pick up a leftover password and the manager rejects it.
+- name: Remove stale registration password
+  ansible.builtin.file:
+    path: /var/ossec/etc/authd.pass
+    state: absent
+  when: wazuh_registration_method != "password"
+
+# Not fatal: the sensors are still worth deploying on an unenrolled host.
+# changed_when gates the handler, so a failed registration does not trigger a
+# pointless agent restart.
+- name: Register agent ({{ wazuh_registration_method }})
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/var/ossec/bin/agent-auth',
+          '-m', wazuh_manager_address,
+          '-p', wazuh_registration_port | string,
+          '-A', wazuh_agent_name,
+          '-G', wazuh_agent_group]
+         + (['-x', wazuh_agent_cert_dest, '-k', wazuh_agent_key_dest, '-v', wazuh_manager_ca_dest]
+            if wazuh_registration_method == 'certificate' else []) }}
+  when: wazuh_client_keys.stat.size | default(0) == 0
+  register: wazuh_registration
+  failed_when: false
+  changed_when: wazuh_registration.rc == 0
+  notify: Restart wazuh-agent
+
+- name: Warn that the agent is not enrolled
+  ansible.builtin.debug:
+    msg: >-
+      Registration of '{{ wazuh_agent_name }}' failed — host is not enrolled;
+      sensors were still deployed.
+      {{ wazuh_registration.stderr_lines | default([]) | last | default('') }}
+  when:
+    - wazuh_registration is not skipped
+    - wazuh_registration.rc | default(0) != 0

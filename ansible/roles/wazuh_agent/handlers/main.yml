@@ -1,0 +1,17 @@
+---
+- name: Restart wazuh-agent
+  ansible.builtin.service:
+    name: wazuh-agent
+    state: restarted
+
+# Not a restart: the RHEL-family auditd unit sets RefuseManualStop=yes, so
+# `systemctl restart auditd` fails. augenrules --load applies a changed
+# ruleset everywhere without one.
+- name: Load audit rules
+  ansible.builtin.command: augenrules --load
+  changed_when: true
+
+- name: Restart falco
+  ansible.builtin.systemd:
+    name: "{{ falco_unit }}"
+    state: restarted

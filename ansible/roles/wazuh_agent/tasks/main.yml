@@ -1,0 +1,38 @@
+---
+- name: Validate variables
+  ansible.builtin.assert:
+    that:
+      - wazuh_manager_address | length > 0
+      - wazuh_manager_address is not match("<.*>")
+      - wazuh_agent_version | length > 0
+      - ansible_facts.os_family in ["Debian", "RedHat", "Suse"]
+      - wazuh_registration_method in ["none", "password", "certificate"]
+      - wazuh_registration_method != "password" or wazuh_registration_password | length > 0
+      - wazuh_registration_method != "certificate" or
+        (wazuh_agent_cert_src | length > 0 and wazuh_agent_key_src | length > 0 and wazuh_manager_ca_src | length > 0)
+    fail_msg: "Invalid or missing role variables, see README (the failed condition is shown above)"
+
+- name: Install, configure and register Wazuh agent
+  ansible.builtin.include_tasks: "{{ wazuh_task_file }}.yml"
+  loop: [install, configure, register]
+  loop_control:
+    loop_var: wazuh_task_file
+
+- name: Enable and start Wazuh agent service
+  ansible.builtin.service:
+    name: wazuh-agent
+    state: started
+    enabled: true
+
+# auditd first: LAUREL is an auditd plugin and will not install without it.
+- name: Install auditd ruleset
+  ansible.builtin.include_tasks: auditd.yml
+  when: wazuh_install_auditd
+
+- name: Install LAUREL
+  ansible.builtin.include_tasks: laurel.yml
+  when: wazuh_install_laurel
+
+- name: Install Falco
+  ansible.builtin.include_tasks: falco.yml
+  when: wazuh_install_falco

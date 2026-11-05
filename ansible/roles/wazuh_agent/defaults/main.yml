@@ -1,0 +1,49 @@
+---
+# Standalone fallbacks; set deployment values in inventory/group_vars/wazuh_agents.yml.
+wazuh_manager_address: ""
+wazuh_agent_version: ""
+wazuh_agent_group: "default"
+wazuh_agent_name: "{{ inventory_hostname }}"
+wazuh_manager_port: 1514        # agent <-> manager traffic
+wazuh_registration_port: 1515   # agent-auth enrollment
+
+# none | password | certificate
+wazuh_registration_method: "none"
+wazuh_registration_password: ""  # set via vault or extra-vars
+
+# Certificate registration: *_src on the control node, *_dest on the agent
+wazuh_agent_cert_src: ""
+wazuh_agent_key_src: ""
+wazuh_manager_ca_src: ""
+wazuh_agent_cert_dest: "/var/ossec/etc/sslagent.cert"
+wazuh_agent_key_dest: "/var/ossec/etc/sslagent.key"
+wazuh_manager_ca_dest: "/var/ossec/etc/rootCA.pem"
+
+# Path to your own ossec.conf Jinja2 template; empty = built-in minimal one
+wazuh_custom_config_template: ""
+
+# ---- Sensors -----------------------------------------------------------------
+# Repo root, where the auditd ruleset, LAUREL installer and Falco config live.
+wazuh_installer_repo: "{{ playbook_dir }}/.."
+
+wazuh_install_auditd: true
+wazuh_install_laurel: true
+wazuh_install_falco: true
+
+# Whether the built-in ossec.conf template carries the <localfile> entries for
+# the sensor logs. Set to false when the manager's shared agent.conf already
+# collects them -- defining a localfile in both places makes the agent tail the
+# file twice. Ignored when wazuh_custom_config_template is set.
+wazuh_sensor_localfiles: true
+
+# Log files the agent tails; the sensor flags above control the <localfile>
+# entries in the built-in ossec.conf template.
+laurel_log: "/var/log/laurel/audit.log"
+falco_log: "/var/log/falco/events.json"
+
+# Empty = whatever laurel/install-laurel.sh pins. Override both together.
+laurel_version: ""
+laurel_sha256: ""
+laurel_build_from_source: false
+
+falco_gpg_url: "https://falco.org/repo/falcosecurity-packages.asc"
