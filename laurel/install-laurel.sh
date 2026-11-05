@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install-laurel.sh -- Build and install LAUREL from source
+# install-laurel.sh -- Install LAUREL as an auditd plugin
+#
+# On x86_64 the upstream statically-linked musl release binary is downloaded and
+# verified against a pinned sha256. Everything else builds from source.
 #
 # Can be sourced by install.sh (exposes install_laurel()) or run standalone.
 #
@@ -9,8 +12,13 @@
 #
 # Requirements:
 #   - Root privileges
-#   - Internet access (to clone the repo and install packages)
+#   - Internet access (to fetch the release or clone the repo)
 #   - auditd must be installed and running
+#
+# Environment:
+#   LAUREL_VERSION=v0.8.3         install a different release (see _LAUREL_SHA256)
+#   LAUREL_SHA256=<hex>           sha256 of that release's x86_64-musl tarball
+#   LAUREL_BUILD_FROM_SOURCE=1    always build, even on x86_64
 # =============================================================================
 
 # Use lib/common.sh helpers when called from install.sh; otherwise define inline.
@@ -39,15 +47,23 @@ fi
 # Settings — globals so the EXIT trap can reference them after the function returns
 # ---------------------------------------------------------------------------
 _LAUREL_REPO="https://github.com/threathunters-io/laurel.git"
-# Revision to build; defaults to the highest release tag on the remote.
-# Set LAUREL_VERSION to pin one. Building the branch tip was not reproducible.
-_LAUREL_VERSION="${LAUREL_VERSION:-}"
+_LAUREL_RELEASE_URL="https://github.com/threathunters-io/laurel/releases/download"
+# Pinned release. The prebuilt tarball is checksum-verified, so the version and
+# the hash below belong together -- bump both, or pass LAUREL_VERSION with a
+# matching LAUREL_SHA256. Upstream publishes no checksum or signature files, so
+# this pin is the only thing standing between a release asset and /usr/local/sbin.
+_LAUREL_PINNED_VERSION="v0.8.2"
+_LAUREL_PINNED_SHA256="89f6bfbed42a5b6824aa847cecf43abc55dafe6778515c3514be43c037ef2662"
+_LAUREL_VERSION="${LAUREL_VERSION:-${_LAUREL_PINNED_VERSION}}"
+_LAUREL_SHA256="${LAUREL_SHA256:-}"
 _LAUREL_USER="_laurel"
 _LAUREL_BIN="/usr/local/sbin/laurel"
 _LAUREL_CONF_DIR="/etc/laurel"
 _LAUREL_CONF="${_LAUREL_CONF_DIR}/config.toml"
 _LAUREL_LOG_DIR="/var/log/laurel"
 _LAUREL_BUILD_DIR=""
+# Path to the binary produced by whichever of the two paths below ran.
+_LAUREL_BUILT_BIN=""
 
 _laurel_cleanup() {
     if [[ -d "${_LAUREL_BUILD_DIR:-}" ]]; then
@@ -56,13 +72,101 @@ _laurel_cleanup() {
     fi
 }
 
-# Highest semver release tag on the remote, e.g. "v0.6.3".
-_laurel_latest_tag() {
-    git ls-remote --tags --refs "${_LAUREL_REPO}" 2>/dev/null \
-        | awk -F/ '{print $NF}' \
-        | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-        | sort -V \
-        | tail -1
+# Expected sha256 of the x86_64-musl tarball for _LAUREL_VERSION, or empty when
+# none is known -- an unverifiable download is not installed.
+_laurel_prebuilt_sha() {
+    if [[ -n "${_LAUREL_SHA256}" ]]; then
+        echo "${_LAUREL_SHA256}"
+    elif [[ "${_LAUREL_VERSION}" == "${_LAUREL_PINNED_VERSION}" ]]; then
+        echo "${_LAUREL_PINNED_SHA256}"
+    fi
+}
+
+# Prints why the prebuilt binary cannot be used, or nothing when it can.
+# Pure (reads globals and uname only) so test/laurel-prebuilt-test.sh can drive it.
+_laurel_prebuilt_blocker() {
+    if [[ "${LAUREL_BUILD_FROM_SOURCE:-0}" == "1" ]]; then
+        echo "LAUREL_BUILD_FROM_SOURCE=1"
+    # Upstream ships a static musl asset for x86_64 only. The aarch64 and armv7
+    # assets are glibc builds that need GLIBC_2.30, which is newer than RHEL 8
+    # and Debian 10 carry, so they are no more portable than a source build.
+    elif [[ "$(uname -m)" != "x86_64" ]]; then
+        echo "no static release asset for $(uname -m)"
+    elif [[ -z "$(_laurel_prebuilt_sha)" ]]; then
+        echo "no known sha256 for ${_LAUREL_VERSION} (set LAUREL_SHA256 to use the release tarball)"
+    fi
+}
+
+# Download, verify and unpack the static release tarball. Sets _LAUREL_BUILT_BIN.
+# Returns 1 if the download fails, so the caller can fall back to a source build.
+_laurel_fetch_prebuilt() {
+    local ver="${_LAUREL_VERSION#v}"
+    local tgz="${_LAUREL_BUILD_DIR}/laurel.tar.gz"
+    local url="${_LAUREL_RELEASE_URL}/${_LAUREL_VERSION}/laurel-${ver}-x86_64-musl.tar.gz"
+    local want; want="$(_laurel_prebuilt_sha)"
+
+    info "Downloading ${url} ..."
+    if ! curl -fsSL --retry 3 --connect-timeout 15 -o "${tgz}" "${url}"; then
+        warn "Download of ${url} failed."
+        return 1
+    fi
+
+    # A hash mismatch is a tampering or wrong-pin signal, not a transient
+    # error: fail hard instead of quietly building something else.
+    if ! echo "${want}  ${tgz}" | sha256sum -c --status -; then
+        die "sha256 mismatch on ${url}
+  expected ${want}
+  got      $(sha256sum "${tgz}" | awk '{print $1}')
+If you bumped LAUREL_VERSION, pass the matching LAUREL_SHA256."
+    fi
+    ok "sha256 verified  (${want})"
+
+    tar xzf "${tgz}" -C "${_LAUREL_BUILD_DIR}" || die "Extracting ${tgz} failed."
+    # The top-level directory carries version and flavour, and entries are
+    # "./"-prefixed, so --strip-components would need 2. Glob it instead.
+    local found=( "${_LAUREL_BUILD_DIR}"/*/bin/laurel )
+    [[ -x "${found[0]}" ]] || die "No bin/laurel in ${url}."
+    _LAUREL_BUILT_BIN="${found[0]}"
+}
+
+# Install a toolchain, clone the pinned tag and build. Sets _LAUREL_BUILT_BIN.
+_laurel_build_from_source() {
+    info "Installing build dependencies ..."
+    if command -v apt-get >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y -qq git clang libacl1-dev pkg-config curl >/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q git clang libacl-devel pkg-config curl
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q git clang libacl-devel pkg-config curl
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y git clang libacl-devel pkg-config curl
+    else
+        die "No supported package manager found for build dependencies."
+    fi
+
+    if ! command -v cargo >/dev/null 2>&1; then
+        info "Rust toolchain not found — installing via rustup ..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
+        # shellcheck disable=SC1091
+        source "${HOME}/.cargo/env"
+    fi
+    ok "Build dependencies ready  (rustc $(rustc --version | awk '{print $2}'))"
+
+    # A previous fetch attempt may have left the tarball and its contents here.
+    local src="${_LAUREL_BUILD_DIR}/src"
+    info "Cloning LAUREL ${_LAUREL_VERSION} into ${src} ..."
+    git clone --quiet --depth 1 --branch "${_LAUREL_VERSION}" "${_LAUREL_REPO}" "${src}" \
+        || die "Clone of ${_LAUREL_REPO} at ${_LAUREL_VERSION} failed."
+    ok "Building LAUREL ${_LAUREL_VERSION}  (commit $(git -C "${src}" rev-parse --short HEAD))"
+
+    info "Building release binary (this may take a few minutes) ..."
+    pushd "${src}" >/dev/null
+    cargo build --release --quiet 2>&1
+    popd >/dev/null
+
+    _LAUREL_BUILT_BIN="${src}/target/release/laurel"
+    [[ -x "${_LAUREL_BUILT_BIN}" ]] || die "Build failed — ${_LAUREL_BUILT_BIN} not found."
 }
 
 # ---------------------------------------------------------------------------
@@ -77,7 +181,12 @@ install_laurel() {
     fi
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        info "[DRY-RUN] Would build and install LAUREL from ${_LAUREL_REPO}"
+        local dr_blocker; dr_blocker="$(_laurel_prebuilt_blocker)"
+        if [[ -n "${dr_blocker}" ]]; then
+            info "[DRY-RUN] Would build LAUREL ${_LAUREL_VERSION} from ${_LAUREL_REPO}: ${dr_blocker}"
+        else
+            info "[DRY-RUN] Would install the static LAUREL ${_LAUREL_VERSION} x86_64-musl release binary"
+        fi
         info "[DRY-RUN] Would create user '${_LAUREL_USER}' and register auditd plugin"
         return 0
     fi
@@ -110,51 +219,28 @@ install_laurel() {
     _LAUREL_BUILD_DIR=$(mktemp -d /tmp/laurel-build-XXXX)
     trap _laurel_cleanup EXIT
 
-    # Step 1: build dependencies
-    info "Installing build dependencies ..."
-    if command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y -qq git clang libacl1-dev pkg-config curl >/dev/null
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y -q git clang libacl-devel pkg-config curl
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y -q git clang libacl-devel pkg-config curl
-    elif command -v zypper >/dev/null 2>&1; then
-        zypper install -y git clang libacl-devel pkg-config curl
+    # Steps 1-2: obtain the binary, by download or by build.
+    local blocker; blocker="$(_laurel_prebuilt_blocker)"
+    if [[ -n "${blocker}" ]]; then
+        info "Building LAUREL ${_LAUREL_VERSION} from source: ${blocker}"
+        _laurel_build_from_source
+    elif ! _laurel_fetch_prebuilt; then
+        warn "Falling back to a source build."
+        _laurel_build_from_source
     else
-        die "No supported package manager found for build dependencies."
+        # Static musl builds cannot use nsswitch: user and group lookups read
+        # /etc/passwd and /etc/group only (upstream issue #84). On a host with a
+        # remote user database, enrich.user-groups below goes silently blank.
+        if grep -Eq '^(passwd|group):.*(sss|ldap|winbind|nis)' /etc/nsswitch.conf 2>/dev/null; then
+            warn "This host resolves users via a remote database (nsswitch), which the"
+            warn "static binary cannot query — group enrichment will be incomplete."
+            warn "Re-run with LAUREL_BUILD_FROM_SOURCE=1 for a build that can."
+        fi
     fi
-
-    if ! command -v cargo >/dev/null 2>&1; then
-        info "Rust toolchain not found — installing via rustup ..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet
-        # shellcheck disable=SC1091
-        source "${HOME}/.cargo/env"
-    fi
-    ok "Build dependencies ready  (rustc $(rustc --version | awk '{print $2}'))"
-
-    # Step 2: clone and build
-    if [[ -z "${_LAUREL_VERSION}" ]]; then
-        info "Resolving latest LAUREL release tag ..."
-        _LAUREL_VERSION="$(_laurel_latest_tag)"
-        [[ -n "${_LAUREL_VERSION}" ]] \
-            || die "Could not resolve a LAUREL release tag — set LAUREL_VERSION explicitly."
-    fi
-
-    info "Cloning LAUREL ${_LAUREL_VERSION} into ${_LAUREL_BUILD_DIR} ..."
-    git clone --quiet --depth 1 --branch "${_LAUREL_VERSION}" \
-        "${_LAUREL_REPO}" "${_LAUREL_BUILD_DIR}" \
-        || die "Clone of ${_LAUREL_REPO} at ${_LAUREL_VERSION} failed."
-    ok "Building LAUREL ${_LAUREL_VERSION}  (commit $(git -C "${_LAUREL_BUILD_DIR}" rev-parse --short HEAD))"
-
-    info "Building release binary (this may take a few minutes) ..."
-    pushd "${_LAUREL_BUILD_DIR}" >/dev/null
-    cargo build --release --quiet 2>&1
-    popd >/dev/null
-
-    local built_bin="${_LAUREL_BUILD_DIR}/target/release/laurel"
-    [[ -x "${built_bin}" ]] || die "Build failed — ${built_bin} not found."
-    ok "Build succeeded  ($(file -b "${built_bin}" | cut -d, -f1-2))"
+    local built_bin="${_LAUREL_BUILT_BIN}"
+    # Fields 1,2,4 are type, architecture and linkage — the last one is the
+    # whole point of the prebuilt path, so keep it in the log.
+    ok "Binary ready  ($(file -b "${built_bin}" | cut -d, -f1,2,4))"
 
     # Step 3: system user and log directory
     if id "${_LAUREL_USER}" >/dev/null 2>&1; then

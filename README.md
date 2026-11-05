@@ -11,7 +11,7 @@ sudo bash install.sh --manager <manager-ip-or-fqdn>
 This installs:
 1. The **Wazuh agent** (configured and enrolled against your manager)
 2. **auditd** with the hardened ruleset from this repo, as `/etc/audit/rules.d/99-wazuh.rules`
-3. **LAUREL** (built from its latest release tag, registered as an auditd plugin)
+3. **LAUREL** (upstream's static release binary on x86_64, built from source on other architectures; registered as an auditd plugin)
 4. **Falco** (from the official package repo, `modern_ebpf` driver) with this repo's ruleset in `/etc/falco/rules.d/`
 5. A `<localfile>` entry in `ossec.conf` for each sensor, so the agent forwards `/var/log/laurel/audit.log` and `/var/log/falco/events.json`
 
@@ -86,15 +86,29 @@ sudo WAZUH_REGISTRATION_PASSWORD="$(cat /root/.wazuh-pass)" bash install.sh --ma
 
 The `WAZUH_*` deployment variables are applied by the Wazuh package's post-install script. If `wazuh-agent` is already installed, that script does not run again, so a different `--manager` or `--agent-group` has no effect — the installer says so instead of reporting success. Edit `/var/ossec/etc/ossec.conf`, or purge the agent first.
 
-### Pinning the LAUREL version
+### How LAUREL gets installed, and pinning its version
 
-By default the newest release tag on the LAUREL remote is built. To pin one:
+On **x86_64** the installer downloads upstream's `x86_64-musl` release tarball and verifies it against a sha256 pinned in `laurel/install-laurel.sh`. That binary is `static-pie` linked with no `NEEDED` entries at all — no libc, no `libacl` — so one artefact runs on every distribution the installer supports, and no Rust toolchain, `clang` or `-dev` package is installed on the host.
+
+On **other architectures** it builds from source as before. Upstream publishes no static asset for aarch64 or armv7, and its glibc builds are not a portable substitute: v0.8.2's require `GLIBC_2.30`, which is newer than RHEL 8 (2.28) or Debian 10 ship, despite what upstream's `INSTALL.md` says about CentOS 7.
+
+The version is pinned, because the checksum is: a version and its hash are bumped together. To install a different release, supply both:
 
 ```bash
-sudo LAUREL_VERSION=v0.8.2 bash install.sh --manager 10.0.0.1
+sudo LAUREL_VERSION=v0.8.3 \
+     LAUREL_SHA256=<sha256 of laurel-0.8.3-x86_64-musl.tar.gz> \
+     bash install.sh --manager 10.0.0.1
 ```
 
-LAUREL is compiled from source, which installs a Rust toolchain via `rustup` when `cargo` is absent. On hosts where that is not acceptable, use `--skip-laurel` and deploy a pre-built binary.
+Pass `LAUREL_VERSION` alone and the installer builds that tag from source instead of installing a tarball it cannot verify. Upstream ships no checksum or signature files alongside its releases, so this pin is the only thing standing between a release asset and `/usr/local/sbin`. A hash mismatch aborts the install; a failed *download* falls back to a source build.
+
+**The one regression to know about.** A static musl binary cannot use `nsswitch`, so user and group lookups read `/etc/passwd` and `/etc/group` only ([upstream issue #84](https://github.com/threathunters-io/laurel/issues/84)). On a host whose users come from SSSD, LDAP, winbind or NIS, the `enrich.user-groups` output is incomplete — the installer checks `/etc/nsswitch.conf` and warns when it sees this. UID→name translation is unaffected, since `translate.user-db` is off in the shipped config. For a build that can query `nsswitch`:
+
+```bash
+sudo LAUREL_BUILD_FROM_SOURCE=1 bash install.sh --manager 10.0.0.1
+```
+
+The source build installs a Rust toolchain via `rustup` when `cargo` is absent. On hosts where neither path is acceptable, use `--skip-laurel`.
 
 ### Falco driver and kernel requirements
 
@@ -252,6 +266,13 @@ bash test/container-test.sh --target debian:13 --verbose
 It needs docker and cgroup v2, and does not need root. The manager address defaults to `192.0.2.1`, which is TEST-NET-1 and unroutable on purpose: the agent installs and starts without enrolling, so running the harness cannot leave stray agents in a real manager's agent list.
 
 It covers repo and GPG key setup, package availability and naming, the non-interactive Falco driver preseed, unit names, ruleset/config/logrotate deployment, `falco --validate`, the `<localfile>` blocks, and the whole uninstall and purge path including that `/var/log/falco` survives.
+
+`test/laurel-prebuilt-test.sh` covers the LAUREL install-path decision separately — which hosts get the prebuilt binary and which build from source — and with `--online` re-checks the pinned sha256 against the asset upstream currently serves, which is the check to run after bumping `LAUREL_VERSION`:
+
+```bash
+bash test/laurel-prebuilt-test.sh            # decision logic only, no network
+bash test/laurel-prebuilt-test.sh --online   # also verify the pin
+```
 
 It does **not** cover anything kernel-coupled, because a container shares the host kernel: auditd rules actually loading, the Falco driver attaching, or any event firing. The driver choice is even made from the *host's* kernel version and BTF rather than the target distribution's. auditd and LAUREL are skipped for that reason, and both sensor test scripts still need a real VM of the target distribution.
 
