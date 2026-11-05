@@ -1,5 +1,5 @@
 ################################################################################
-# FALCO CONFIG DROP-IN -- wazuh-auditd-installer: managed config
+# FALCO CONFIG DROP-IN -- wazuh-linux-sensors: managed config
 #
 # Deployed as /etc/falco/config.d/zz-wazuh.yaml
 #

@@ -1,4 +1,4 @@
-# wazuh-auditd-installer: managed logrotate config for Falco's JSON output
+# wazuh-linux-sensors: managed logrotate config for Falco's JSON output
 #
 # Falco's file_output does not rotate /var/log/falco/events.json itself, so
 # without this the file grows until the filesystem fills.

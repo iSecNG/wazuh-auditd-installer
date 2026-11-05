@@ -1,4 +1,4 @@
-# wazuh-auditd-installer
+# wazuh-linux-sensors
 
 Linux installer that deploys a [Wazuh](https://wazuh.com/) agent with two complementary sensors: auditd with [LAUREL](https://github.com/threathunters-io/laurel) for the audit trail, and [Falco](https://falco.org/) for behavioural detection. Supports Ubuntu/Debian, RHEL/CentOS/AlmaLinux/Rocky, Fedora, Amazon Linux, and openSUSE/SLES.
 

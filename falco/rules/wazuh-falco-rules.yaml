@@ -1,5 +1,5 @@
 ################################################################################
-# FALCO RULESET -- wazuh-auditd-installer: managed ruleset
+# FALCO RULESET -- wazuh-linux-sensors: managed ruleset
 #
 # Deployed as /etc/falco/rules.d/wazuh-falco-rules.yaml
 #

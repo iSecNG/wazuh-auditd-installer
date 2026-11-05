@@ -9,10 +9,20 @@ _OSSEC_CONF="/var/ossec/etc/ossec.conf"
 _CLIENT_KEYS="/var/ossec/etc/client.keys"
 
 # Delimits the block appended to ossec.conf so uninstall can remove just that.
-_LAUREL_LF_BEGIN="<!-- BEGIN wazuh-auditd-installer: LAUREL -->"
-_LAUREL_LF_END="<!-- END wazuh-auditd-installer: LAUREL -->"
-_FALCO_LF_BEGIN="<!-- BEGIN wazuh-auditd-installer: FALCO -->"
-_FALCO_LF_END="<!-- END wazuh-auditd-installer: FALCO -->"
+_LAUREL_LF_BEGIN="<!-- BEGIN wazuh-linux-sensors: LAUREL -->"
+_LAUREL_LF_END="<!-- END wazuh-linux-sensors: LAUREL -->"
+_FALCO_LF_BEGIN="<!-- BEGIN wazuh-linux-sensors: FALCO -->"
+_FALCO_LF_END="<!-- END wazuh-linux-sensors: FALCO -->"
+
+# Hosts installed before the wazuh-auditd-installer -> wazuh-linux-sensors rename
+# carry the old project name in their markers. Uninstall matches on these ERE
+# patterns instead of the literals above, so it still finds those blocks.
+# Drop the alternation once no host predating the rename is left.
+_MARKER_PROJECT_RE="wazuh-(auditd-installer|linux-sensors)"
+_LAUREL_LF_BEGIN_RE="<!-- BEGIN ${_MARKER_PROJECT_RE}: LAUREL -->"
+_LAUREL_LF_END_RE="<!-- END ${_MARKER_PROJECT_RE}: LAUREL -->"
+_FALCO_LF_BEGIN_RE="<!-- BEGIN ${_MARKER_PROJECT_RE}: FALCO -->"
+_FALCO_LF_END_RE="<!-- END ${_MARKER_PROJECT_RE}: FALCO -->"
 
 # Derives the major version for the repo URL (e.g. "4.9.1" -> "4", empty -> "4").
 _wazuh_repo_major() {

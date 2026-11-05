@@ -2,12 +2,14 @@
 # Source this file; do not execute directly.
 # Requires: PKG_MGR, PKG_FMT, WAZUH_REPO_FLAVOR (from detect.sh)
 #           AUDITD_RULES_DST (from install-auditd.sh)
-#           _OSSEC_CONF, _LAUREL_LF_*, _FALCO_LF_* (from install-wazuh-agent.sh)
+#           _OSSEC_CONF, _LAUREL_LF_*_RE, _FALCO_LF_*_RE (from install-wazuh-agent.sh)
 #           _FALCO_* paths (from install-falco.sh)
 
 # Marker line in every ruleset we deploy, to tell ours apart from a
-# distro-provided /etc/audit/rules.d/audit.rules.
-_AUDITD_RULES_MARKER="# wazuh-auditd-installer: managed ruleset"
+# distro-provided /etc/audit/rules.d/audit.rules. An ERE, not a literal: rulesets
+# deployed before the wazuh-auditd-installer -> wazuh-linux-sensors rename carry
+# the old name and must still be recognised as ours.
+_AUDITD_RULES_MARKER_RE="# wazuh-(auditd-installer|linux-sensors): managed ruleset"
 
 uninstall_wazuh_agent() {
     section "Uninstall: Wazuh Agent"
@@ -83,7 +85,7 @@ uninstall_auditd() {
     # ship. Only remove it when it carries our marker.
     local legacy="/etc/audit/rules.d/audit.rules"
     if [[ -f "${legacy}" ]]; then
-        if grep -qF "${_AUDITD_RULES_MARKER}" "${legacy}" 2>/dev/null; then
+        if grep -qE "${_AUDITD_RULES_MARKER_RE}" "${legacy}" 2>/dev/null; then
             info "Removing legacy ruleset at ${legacy} ..."
             run rm -f "${legacy}"
             removed=true
@@ -163,11 +165,12 @@ uninstall_laurel() {
 
     # Drop the <localfile> block we appended, if ossec.conf is still there.
     if [[ -f "${_OSSEC_CONF}" ]] \
-        && grep -qF "${_LAUREL_LF_BEGIN}" "${_OSSEC_CONF}" 2>/dev/null; then
+        && grep -qE "${_LAUREL_LF_BEGIN_RE}" "${_OSSEC_CONF}" 2>/dev/null; then
         info "Removing LAUREL <localfile> entry from ${_OSSEC_CONF} ..."
         run cp -a "${_OSSEC_CONF}" "${_OSSEC_CONF}.bak.$(date +%s)"
-        # The markers are literal XML comments with no sed metacharacters.
-        run sed -i "\\|${_LAUREL_LF_BEGIN}|,\\|${_LAUREL_LF_END}|d" "${_OSSEC_CONF}"
+        # The markers are XML comments, so # is safe as the sed address delimiter --
+        # | is not, the pattern is an ERE and contains one.
+        run sed -i -E "\\#${_LAUREL_LF_BEGIN_RE}#,\\#${_LAUREL_LF_END_RE}#d" "${_OSSEC_CONF}"
         ok "Entry removed"
     fi
 
@@ -260,10 +263,10 @@ uninstall_falco() {
 
     # Drop the <localfile> block we appended, if ossec.conf is still there.
     if [[ -f "${_OSSEC_CONF}" ]] \
-        && grep -qF "${_FALCO_LF_BEGIN}" "${_OSSEC_CONF}" 2>/dev/null; then
+        && grep -qE "${_FALCO_LF_BEGIN_RE}" "${_OSSEC_CONF}" 2>/dev/null; then
         info "Removing Falco <localfile> entry from ${_OSSEC_CONF} ..."
         run cp -a "${_OSSEC_CONF}" "${_OSSEC_CONF}.bak.$(date +%s)"
-        run sed -i "\\|${_FALCO_LF_BEGIN}|,\\|${_FALCO_LF_END}|d" "${_OSSEC_CONF}"
+        run sed -i -E "\\#${_FALCO_LF_BEGIN_RE}#,\\#${_FALCO_LF_END_RE}#d" "${_OSSEC_CONF}"
         ok "Entry removed"
     fi
 

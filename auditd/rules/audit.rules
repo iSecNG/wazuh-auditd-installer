@@ -1,6 +1,6 @@
 ##############################################################################
 # AUDITD RULESET
-# wazuh-auditd-installer: managed ruleset
+# wazuh-linux-sensors: managed ruleset
 #
 # Deployed as /etc/audit/rules.d/99-wazuh.rules
 #

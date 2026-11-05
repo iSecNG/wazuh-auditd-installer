@@ -190,7 +190,7 @@ test_target() {
     assert_has "${name}" /etc/systemd/system/falcoctl-artifact-follow.service \
                                                                   "falcoctl masked"
 
-    cx "${name}" "grep -q 'BEGIN wazuh-auditd-installer: FALCO' /var/ossec/etc/ossec.conf" >/dev/null 2>&1 \
+    cx "${name}" "grep -qE 'BEGIN wazuh-(auditd-installer|linux-sensors): FALCO' /var/ossec/etc/ossec.conf" >/dev/null 2>&1 \
         && pass "<localfile> block added to ossec.conf" \
         || fail "<localfile> block added to ossec.conf"
 
