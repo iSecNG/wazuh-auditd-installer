@@ -10,6 +10,8 @@ _OSSEC_CONF="/var/ossec/etc/ossec.conf"
 # Delimits the block appended to ossec.conf so uninstall can remove just that.
 _LAUREL_LF_BEGIN="<!-- BEGIN wazuh-auditd-installer: LAUREL -->"
 _LAUREL_LF_END="<!-- END wazuh-auditd-installer: LAUREL -->"
+_FALCO_LF_BEGIN="<!-- BEGIN wazuh-auditd-installer: FALCO -->"
+_FALCO_LF_END="<!-- END wazuh-auditd-installer: FALCO -->"
 
 # Derives the major version for the repo URL (e.g. "4.9.1" -> "4", empty -> "4").
 _wazuh_repo_major() {
@@ -223,6 +225,53 @@ ${_LAUREL_LF_BEGIN}
   </localfile>
 </ossec_config>
 ${_LAUREL_LF_END}
+CONF
+    ok "Entry added"
+
+    info "Restarting wazuh-agent to pick up the new log source ..."
+    if systemctl restart wazuh-agent; then
+        ok "wazuh-agent restarted"
+    else
+        warn "wazuh-agent restart failed — check: journalctl -u wazuh-agent"
+    fi
+}
+
+# Adds the <localfile> entry that forwards Falco's JSON output. Same shape as
+# configure_laurel_localfile above, with its own markers so uninstall can
+# remove exactly this block. Idempotent.
+configure_falco_localfile() {
+    section "Agent log collection (Falco)"
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        ok "[DRY-RUN] Would add a <localfile> entry for /var/log/falco/events.json to ${_OSSEC_CONF}"
+        return 0
+    fi
+
+    if [[ ! -f "${_OSSEC_CONF}" ]]; then
+        warn "${_OSSEC_CONF} not found — add the Falco <localfile> entry manually:"
+        warn "  <localfile><log_format>json</log_format><location>/var/log/falco/events.json</location></localfile>"
+        return 0
+    fi
+
+    if grep -q "/var/log/falco/events.json" "${_OSSEC_CONF}"; then
+        ok "Falco log already configured for collection"
+        return 0
+    fi
+
+    info "Backing up ${_OSSEC_CONF} ..."
+    cp -a "${_OSSEC_CONF}" "${_OSSEC_CONF}.bak.$(date +%s)"
+
+    info "Adding <localfile> entry for /var/log/falco/events.json ..."
+    cat >> "${_OSSEC_CONF}" <<CONF
+
+${_FALCO_LF_BEGIN}
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/falco/events.json</location>
+  </localfile>
+</ossec_config>
+${_FALCO_LF_END}
 CONF
     ok "Entry added"
 

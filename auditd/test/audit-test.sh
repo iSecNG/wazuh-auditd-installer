@@ -184,9 +184,20 @@ check_exec_key() {
         # grep found the match. '<<< "$var"' has no pipe, so no SIGPIPE.
         if grep -qF "$binary" <<< "$exec_out"; then
             pass "$desc  (key: exec -- specific key '$key' shadowed by the broad exec rule)"
+            note "This host has broad execve enabled, which shadows '$key'."
             note "The event IS recorded; search with:  ausearch -k exec -i | grep '${binary##*/}'"
             return
         fi
+    fi
+
+    # A watch on a symlinked path does not fire: auditd watches the inode it
+    # resolves at load time, and execution resolves the link to a different
+    # inode. /usr/bin/python3 -> python3.12 is the usual case.
+    if [[ -n "$binary" && -L "$binary" ]]; then
+        skip "$desc  (key: $key) -- $binary is a symlink to $(readlink -f "$binary")"
+        note "auditd watches cannot follow symlinks; watch the resolved path, or"
+        note "rely on Falco, which reports the resolved proc.exepath"
+        return
     fi
 
     fail "$desc  (key: $key, binary: $binary)"
@@ -267,19 +278,26 @@ check_exec_key "audittools" "Audit tool executed (auditctl -s)" "/usr/sbin/audit
 # --------------------------------------------------------------------------- #
 section "Command execution"
 
-# The exec rule fires only for auid >= 1000.  runuser -l creates a PAM login
-# session that sets loginuid to the target user's UID.
-if [[ -n "$NON_ROOT_USER" ]]; then
-    run_as_user "$NON_ROOT_USER" "id > /dev/null"
-    check_key "exec" "execve by non-root user ($NON_ROOT_USER)"
-    note "Interactive command logging (Wazuh rule 100122) uses the same auditd key 'exec' with a TTY filter"
+# Broad execve collection is DISABLED by default in this ruleset: Falco's rule
+# "Wazuh: Interactive command executed on terminal" provides the same trail
+# with the parent process attached, and the broad rule shadowed every "-p x"
+# watch below it. So the absence of the 'exec' key is the expected state, and
+# only a host that re-enabled it for a compliance requirement should see events.
+if auditctl -l 2>/dev/null | grep -qE '(-k|key=)exec$'; then
+    if [[ -n "$NON_ROOT_USER" ]]; then
+        run_as_user "$NON_ROOT_USER" "id > /dev/null"
+        check_key "exec" "execve by non-root user ($NON_ROOT_USER)"
+        note "broad execve is enabled on this host: it shadows the per-tool keys below"
+    else
+        skip "exec -- no non-root user found (rule needs auid >= 1000)"
+    fi
 else
-    skip "exec -- no non-root user found (rule needs auid >= 1000)"
+    skip "exec -- broad execve collection is disabled by design (see SECTION 4 of audit.rules)"
+    note "Falco covers this: rule 'Wazuh: Interactive command executed on terminal' (Wazuh rule 225150)"
 fi
 
-# exec_root_unattributed (uid=0, auid=-1) fires for unattributed root processes
-# (cron, init scripts).  Cannot be reliably simulated from a login session.
-skip "exec_root_unattributed -- requires auid=-1; fired by cron/init, not reproducible here"
+# exec_root_unattributed is disabled alongside the broad exec rule.
+skip "exec_root_unattributed -- disabled by design alongside broad execve"
 
 # priv_esc: sudo is watched for execution.
 sudo -V >/dev/null 2>&1 || true
@@ -463,9 +481,23 @@ check_exec_key "recon" "Recon tool executed (id)" "$(command -v id)"
 
 if command -v python3 >/dev/null 2>&1; then
     python3 --version >/dev/null 2>&1 || true
-    # python3 is usually a symlink to python3.X; exe= shows the real path
-    PYTHON_REAL=$(readlink -f "$(command -v python3)" 2>/dev/null || echo "/usr/bin/python3")
-    check_exec_key "interpreter" "Interpreter executed (python3 --version)" "$PYTHON_REAL"
+    # python3 is usually a symlink to python3.X; exe= shows the real path.
+    PYTHON_PATH=$(command -v python3)
+    PYTHON_REAL=$(readlink -f "$PYTHON_PATH" 2>/dev/null || echo "/usr/bin/python3")
+    # A watch is bound to the inode it resolves at load time, so a watch on
+    # /usr/bin/python3 never fires when execution resolves to python3.X. That
+    # is a property of auditd, not a broken rule, so report it as a skip.
+    if [[ "$PYTHON_REAL" != "$PYTHON_PATH" ]] \
+        && ! auditctl -l 2>/dev/null | grep -qF -- "-w $PYTHON_REAL"; then
+        skip "interpreter -- $PYTHON_PATH is a symlink to $PYTHON_REAL"
+        note "auditd watches do not follow symlinks; the watch on $PYTHON_PATH cannot fire."
+        note "Falco covers interpreter execution and reports the resolved path:"
+        note "  rule 'Wazuh: Interactive command executed on terminal' (Wazuh rule 225150)"
+        note "To get the auditd record too, watch the versioned path explicitly:"
+        note "  -w $PYTHON_REAL -p x -k interpreter"
+    else
+        check_exec_key "interpreter" "Interpreter executed (python3 --version)" "$PYTHON_REAL"
+    fi
 else
     skip "interpreter -- python3 not found"
 fi
@@ -546,6 +578,58 @@ else
     check_dir_watch /var/ossec/active-response/bin  "wazuh_ar"      "Wazuh active-response directory modified"
     check_dir_watch /var/ossec/ruleset              "wazuh_ruleset" "Wazuh ruleset directory modified"
 fi
+
+# --------------------------------------------------------------------------- #
+# SECTION 14b  --  Security sensor integrity (Falco, LAUREL, eBPF)
+# --------------------------------------------------------------------------- #
+
+section "Security sensor integrity"
+
+# The mutual-watch half of the sensor split: Falco watches auditd's config,
+# these keys let auditd watch Falco's. See docs/falco-auditd-wazuh.md.
+
+if [[ -d /etc/falco ]]; then
+    check_dir_watch /etc/falco "falco_config" "Falco config directory modified"
+else
+    skip "falco_config -- /etc/falco not present (Falco not installed)"
+fi
+
+if [[ -d /var/log/falco ]]; then
+    check_dir_watch /var/log/falco "falco_logs" "Falco event log directory modified"
+else
+    skip "falco_logs -- /var/log/falco not present (Falco not installed)"
+fi
+
+if [[ -x /usr/bin/falco ]]; then
+    /usr/bin/falco --version >/dev/null 2>&1 || true
+    check_exec_key "falco_exec" "Falco binary executed (--version)" "/usr/bin/falco"
+else
+    skip "falco_exec -- /usr/bin/falco not present"
+fi
+
+if [[ -d /etc/laurel ]]; then
+    check_dir_watch /etc/laurel "laurel_config" "LAUREL config directory modified"
+else
+    skip "laurel_config -- /etc/laurel not present (LAUREL not installed)"
+fi
+
+# bpf(): the rule filters on auid!=-1, so it only matches a program loaded
+# from a login session. Running bpftool under this script satisfies that;
+# Falco's own probes load with auid unset and are correctly not recorded.
+if command -v bpftool >/dev/null 2>&1; then
+    bpftool prog list >/dev/null 2>&1 || true
+    check_key "bpf_load" "eBPF program enumerated via bpftool"
+else
+    # python3 can issue a bare bpf() syscall, which fails with EINVAL but is
+    # still recorded: the audit rule has no success filter.
+    if [[ -n "$(command -v python3)" ]]; then
+        python3 -c 'import ctypes; ctypes.CDLL(None).syscall(321, 0, 0, 0)' >/dev/null 2>&1 || true
+        check_key "bpf_load" "bpf() syscall invoked (failed call, still audited)"
+    else
+        skip "bpf_load -- neither bpftool nor python3 available"
+    fi
+fi
+
 
 # --------------------------------------------------------------------------- #
 # Summary

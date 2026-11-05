@@ -90,14 +90,21 @@ install_laurel() {
         return 0
     fi
 
-    # Detect auditd version to select the correct plugin directory.
-    # auditd 3.x uses /etc/audit/plugins.d/; auditd 2.x uses /etc/audisp/plugins.d/.
-    local auditd_major plugin_dir
-    auditd_major=$(auditctl -v 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo "3")
-    if (( auditd_major >= 3 )); then
-        plugin_dir="/etc/audit/plugins.d"
+    # Select the plugin directory by what the installed auditd actually provides:
+    # 3.x/4.x use /etc/audit/plugins.d/, 2.x uses /etc/audisp/plugins.d/.
+    #
+    # This used to parse `auditctl -v`, which failed silently: `head -1` exits 0
+    # on empty input, so the `|| echo 3` fallback never fired. Whenever auditctl
+    # produced no stdout (no CAP_AUDIT_CONTROL, or not in PATH) the version came
+    # back empty, arithmetic read that as 0, and the config landed in the 2.x
+    # directory that a modern auditd never reads -- LAUREL installed, reported
+    # success and forwarded nothing. Testing for the directory has no such
+    # failure mode and needs no version parsing.
+    local plugin_dir
+    if   [[ -d /etc/audit/plugins.d   ]]; then plugin_dir="/etc/audit/plugins.d"
+    elif [[ -d /etc/audisp/plugins.d  ]]; then plugin_dir="/etc/audisp/plugins.d"
     else
-        plugin_dir="/etc/audisp/plugins.d"
+        die "No auditd plugin directory found (looked for /etc/audit/plugins.d and /etc/audisp/plugins.d) -- is auditd installed?"
     fi
 
     _LAUREL_BUILD_DIR=$(mktemp -d /tmp/laurel-build-XXXX)

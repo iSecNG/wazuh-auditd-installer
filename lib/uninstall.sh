@@ -2,7 +2,8 @@
 # Source this file; do not execute directly.
 # Requires: PKG_MGR, PKG_FMT, WAZUH_REPO_FLAVOR (from detect.sh)
 #           AUDITD_RULES_DST (from install-auditd.sh)
-#           _OSSEC_CONF, _LAUREL_LF_* (from install-wazuh-agent.sh)
+#           _OSSEC_CONF, _LAUREL_LF_*, _FALCO_LF_* (from install-wazuh-agent.sh)
+#           _FALCO_* paths (from install-falco.sh)
 
 # Marker line in every ruleset we deploy, to tell ours apart from a
 # distro-provided /etc/audit/rules.d/audit.rules.
@@ -176,5 +177,101 @@ uninstall_laurel() {
     if [[ -d /var/log/laurel ]]; then
         warn "Log directory preserved at /var/log/laurel"
         warn "Remove manually if no longer needed: rm -rf /var/log/laurel"
+    fi
+}
+
+uninstall_falco() {
+    section "Uninstall: Falco"
+
+    # Stop whichever driver unit is in use before removing the package. The
+    # unit depends on the host's driver choice, so try all of them.
+    local unit
+    for unit in falco-modern-bpf.service falco-kmod.service falco-custom.service; do
+        if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+            info "Stopping ${unit} ..."
+            run systemctl stop "${unit}"
+        fi
+        if systemctl is-enabled --quiet "${unit}" 2>/dev/null; then
+            run_ok systemctl disable "${unit}"
+        fi
+    done
+
+    case "${PKG_FMT}" in
+        deb)
+            if dpkg-query -W -f='${Status}' falco 2>/dev/null \
+                | grep -q "install ok installed"; then
+                info "Removing falco package ..."
+                run env DEBIAN_FRONTEND=noninteractive apt-get purge -y falco
+                ok "Package removed"
+            else
+                ok "falco not installed — skipping"
+            fi
+            if [[ -f "${_FALCO_APT_LIST:-/etc/apt/sources.list.d/falcosecurity.list}" ]]; then
+                info "Removing Falco apt repo and GPG key ..."
+                run rm -f "${_FALCO_APT_LIST:-/etc/apt/sources.list.d/falcosecurity.list}"
+                run rm -f "${_FALCO_KEYRING:-/usr/share/keyrings/falco-archive-keyring.gpg}"
+                info "Running apt-get update ..."
+                run_ok apt-get update -q
+                ok "Apt repo removed"
+            fi
+            ;;
+        rpm)
+            if rpm -q falco >/dev/null 2>&1; then
+                info "Removing falco package ..."
+                case "${PKG_MGR}" in
+                    dnf)    run dnf    remove -y falco ;;
+                    yum)    run yum    remove -y falco ;;
+                    zypper) run zypper --non-interactive remove -y falco ;;
+                esac
+                ok "Package removed"
+            else
+                ok "falco not installed — skipping"
+            fi
+            if [[ -f /etc/yum.repos.d/falcosecurity.repo ]]; then
+                info "Removing Falco yum repo ..."
+                run rm -f /etc/yum.repos.d/falcosecurity.repo
+                ok "Yum repo removed"
+            fi
+            if [[ -f /etc/zypp/repos.d/falcosecurity.repo ]]; then
+                info "Removing Falco zypper repo ..."
+                run rm -f /etc/zypp/repos.d/falcosecurity.repo
+                ok "Zypper repo removed"
+            fi
+            ;;
+    esac
+
+    # Our own files. A package purge does not touch rules.d/config.d drop-ins.
+    local f
+    for f in "${_FALCO_RULES_DST:-/etc/falco/rules.d/wazuh-falco-rules.yaml}" \
+             "${_FALCO_CONF_DST:-/etc/falco/config.d/zz-wazuh.yaml}" \
+             "${_FALCO_LOGROTATE_DST:-/etc/logrotate.d/falco-wazuh}"; do
+        if [[ -f "${f}" ]]; then
+            info "Removing ${f} ..."
+            run rm -f "${f}"
+        fi
+    done
+
+    # Unmask the auto-updater we masked at install time, so a later manual
+    # Falco install behaves the way its own package intends.
+    if [[ "$(readlink /etc/systemd/system/falcoctl-artifact-follow.service 2>/dev/null)" == "/dev/null" ]]; then
+        info "Unmasking falcoctl-artifact-follow.service ..."
+        run_ok systemctl unmask falcoctl-artifact-follow.service
+    fi
+
+    # Drop the <localfile> block we appended, if ossec.conf is still there.
+    if [[ -f "${_OSSEC_CONF}" ]] \
+        && grep -qF "${_FALCO_LF_BEGIN}" "${_OSSEC_CONF}" 2>/dev/null; then
+        info "Removing Falco <localfile> entry from ${_OSSEC_CONF} ..."
+        run cp -a "${_OSSEC_CONF}" "${_OSSEC_CONF}.bak.$(date +%s)"
+        run sed -i "\\|${_FALCO_LF_BEGIN}|,\\|${_FALCO_LF_END}|d" "${_OSSEC_CONF}"
+        ok "Entry removed"
+    fi
+
+    ok "Falco uninstalled"
+
+    # Preserve logs — they may contain forensic data, same as /var/log/laurel.
+    if [[ -d /var/log/falco ]]; then
+        warn "Log directory preserved at /var/log/falco"
+        warn "Remove manually if no longer needed: rm -rf /var/log/falco"
     fi
 }

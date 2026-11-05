@@ -1,0 +1,20 @@
+# wazuh-auditd-installer: managed logrotate config for Falco's JSON output
+#
+# Falco's file_output does not rotate /var/log/falco/events.json itself, so
+# without this the file grows until the filesystem fills.
+#
+# copytruncate is required, not optional: Falco holds the file descriptor open
+# for the lifetime of the process. A plain rename would leave Falco writing to
+# the rotated inode, and events.json would stay empty until the next restart.
+# The Wazuh agent tails the same file and handles the truncation.
+/var/log/falco/events.json {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0640 root root
+}

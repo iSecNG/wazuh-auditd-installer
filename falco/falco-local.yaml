@@ -1,0 +1,76 @@
+################################################################################
+# FALCO CONFIG DROP-IN -- wazuh-auditd-installer: managed config
+#
+# Deployed as /etc/falco/config.d/zz-wazuh.yaml
+#
+# A drop-in rather than an edit to /etc/falco/falco.yaml, which is a dpkg/rpm
+# conffile: editing it in place triggers a config-file prompt on every package
+# upgrade. /etc/falco/falco.yaml already lists /etc/falco/config.d in
+# config_files, so this file is merged automatically.
+#
+# The "zz-" prefix matters: config.d is merged in filename order and falcoctl
+# writes its own engine-kind-falcoctl.yaml there. Sorting last means nothing
+# silently overrides these keys.
+#
+# Driver selection is deliberately NOT set here. The package postinst runs
+# `falcoctl driver config` and writes engine.kind to
+# /etc/falco/config.d/engine-kind-falcoctl.yaml; setting engine.kind here as
+# well would mean two places to change it.
+################################################################################
+
+# ---- Output: JSON to a file for the Wazuh agent to tail -----------------------
+# The Wazuh agent reads this file via a <localfile> block with
+# log_format json. Without json_output the agent gets prose it cannot decode.
+json_output: true
+
+# Puts the rendered alert text in the "output" field, which the Wazuh rules
+# surface as $(output) in their descriptions.
+json_include_output_property: true
+
+# Exposes the rule's tags (MITRE IDs among them) as a "tags" array.
+json_include_tags_property: true
+
+file_output:
+  enabled: true
+  # Falco does not rotate this file. The installer ships
+  # /etc/logrotate.d/falco-wazuh to do it with copytruncate.
+  keep_alive: false
+  filename: /var/log/falco/events.json
+
+# Off by default: with file_output enabled, stdout_output duplicates every
+# alert into the journal, which doubles the disk writes and gives the agent a
+# second copy of each event to collect if journald is also being read.
+stdout_output:
+  enabled: false
+
+syslog_output:
+  enabled: false
+
+# ---- Rule precedence (informational -- do not set rules_files here) ----------
+# Falco's default rule_matching is "first": an event fires only the FIRST rule
+# that matches it, in rules-file load order. The shipped order is
+# falco_rules.yaml, then falco_rules.local.yaml, then /etc/falco/rules.d -- so
+# an upstream rule WINS over this repo's rule for the same event.
+#
+# That order cannot be changed from a drop-in: config.d merges list values by
+# appending, so a rules_files key here is added to the default list instead of
+# replacing it (verified on 0.45.2 -- the resulting load order was unchanged and
+# rules.d was simply listed twice). Reordering would mean editing the
+# falco.yaml conffile or overriding the unit's ExecStart, and neither is worth
+# it for one rule.
+#
+# The practical consequence is a single known overlap: upstream's
+# "Read sensitive file untrusted" fires instead of a Wazuh-prefixed rule for
+# shadow/sudoers/pam reads. That is deliberate -- upstream's version covers more
+# files and is well maintained, so wazuh/rules/225000-det-falco-generic.xml maps
+# that upstream rule name directly, with its own level and MITRE ID.
+#
+# When adding a rule to falco/rules/wazuh-falco-rules.yaml, check it is not
+# shadowed by an upstream rule: trigger it on a test host and confirm the
+# expected name appears in /var/log/falco/events.json. If upstream shadows a
+# rule you need, disable the upstream one by name in
+# /etc/falco/falco_rules.local.yaml:
+#   - rule: Read sensitive file untrusted
+#     enabled: false
+#     override:
+#       enabled: replace

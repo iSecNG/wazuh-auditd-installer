@@ -42,16 +42,10 @@
     <group>laurel,service_generator,</group>
   </rule>
 
-  <!-- The FIM scanner probes each watched path with openat(O_DIRECTORY); on a
-       regular file that returns ENOTDIR, so every scan pass produces a batch of
-       access_denied events and trips frequency rule 223175. Denied access by
-       anything other than wazuh-syscheckd still hits 223174 at level 8. -->
-  <rule id="224004" level="3">
-    <if_sid>223174</if_sid>
-    <field name="SYSCALL.exe" type="pcre2">^/var/ossec/bin/wazuh-syscheckd$</field>
-    <description>LAUREL: failed file access by wazuh-syscheckd FIM scan (whitelisted).</description>
-    <group>laurel,fim_access,</group>
-  </rule>
+  <!-- 224004 (FIM-scanner access_denied whitelist) was removed: its parent
+       223174 is now level 3, so suppressing it to level 3 achieved nothing.
+       Rule 223175, the access_denied burst rule it existed to protect, is gone
+       too - Falco owns burst detection now. -->
 
   <!-- The SCA module shells out to find/findmnt against /var/log/audit on every
        scan cycle for the CIS auditd checks. That is several audit_tampering events

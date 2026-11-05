@@ -99,23 +99,41 @@
 # ============================================================================
 # SECTION 4 -- COMMAND EXECUTION
 # ============================================================================
-# Purpose: record every command executed by non-system users via the execve()
-# syscall. Combined with PROCTITLE and EXECVE kernel records this captures:
-# who ran it, what the full command line was, when, and from which parent
-# process. Essential for incident reconstruction.
+# Purpose: record execution of the binaries that grant privilege. Broad
+# command-execution recording now lives in Falco, which reports the parent
+# process and full command line on one event; see the block below for why, and
+# docs/falco-auditd-wazuh.md for the division of labour.
 #
-# Keys: exec, exec_root_unattributed, priv_esc
+# Keys: priv_esc  (exec and exec_root_unattributed are disabled -- see below)
 
-# 64-bit userspace commands (interactive sessions and scripts).
--a always,exit -F arch=b64 -S execve -F auid>=1000 -F auid!=-1 -k exec
-
-# 32-bit userspace commands (legacy binaries, Wine applications, etc.)
--a always,exit -F arch=b32 -S execve -F auid>=1000 -F auid!=-1 -k exec
-
-# Commands run as root (uid=0) with no login session (auid=-1) -- catches
-# cron jobs, at tasks, and commands run from init/startup scripts.
--a always,exit -F arch=b64 -S execve -F uid=0 -F auid=-1 -k exec_root_unattributed
--a always,exit -F arch=b32 -S execve -F uid=0 -F auid=-1 -k exec_root_unattributed
+# ----------------------------------------------------------------------------
+# BROAD execve COLLECTION -- DISABLED BY DEFAULT
+# ----------------------------------------------------------------------------
+# These four rules recorded every command run by any logged-in user, and every
+# command run as root without a login session. Falco now provides the same
+# visibility with more context (parent process, full command line and cwd on a
+# single event) via the rule "Wazuh: Interactive command executed on terminal".
+#
+# They are disabled for a second, less obvious reason. The kernel evaluates
+# audit rules FIRST-MATCH-WINS. Because these rules sit before every "-p x"
+# watch in this file and match any execve, they tagged those events key="exec"
+# and the specific keys below -- priv_esc, audittools, user_mgmt, firewall,
+# network_tools, exfil_tools, compression, recon, interpreter, power,
+# wazuh_exec -- were NEVER set on a real system. Every Wazuh rule for those
+# keys was dead, which is why the detection rules had to match on SYSCALL.exe
+# instead. With these four rules disabled, those keys fire as intended and the
+# forensic trail per tool category works.
+#
+# RE-ENABLE ONLY IF a compliance framework explicitly requires a complete
+# command trail from the audit subsystem (auditd can guarantee delivery under
+# load via -f 2; Falco drops events under pressure instead). If you do, be
+# aware that it re-shadows every "-p x" watch below, and demote or delete the
+# per-tool Wazuh rules accordingly.
+#
+#-a always,exit -F arch=b64 -S execve -F auid>=1000 -F auid!=-1 -k exec
+#-a always,exit -F arch=b32 -S execve -F auid>=1000 -F auid!=-1 -k exec
+#-a always,exit -F arch=b64 -S execve -F uid=0 -F auid=-1 -k exec_root_unattributed
+#-a always,exit -F arch=b32 -S execve -F uid=0 -F auid=-1 -k exec_root_unattributed
 
 # Privilege-escalation vectors -- execution always recorded regardless of uid.
 # su/sudo: explicit privilege switch; pkexec: CVE-2021-4034 (PwnKit);
@@ -177,9 +195,23 @@
 # logged to detect an attacker unloading a security module (e.g. AppArmor).
 -a always,exit -F arch=b64 -S init_module -S finit_module -S delete_module -F auid!=-1 -k modules
 -a always,exit -F arch=b32 -S init_module -S finit_module -S delete_module -F auid!=-1 -k modules
+#
+# Path rules do NOT follow symlinks: auditd resolves the path to an inode when
+# the rule is loaded, and an execution that goes through a symlink resolves to
+# a different inode. On any usr-merged distribution (Debian 12+, Ubuntu 22.04+,
+# RHEL 8+) insmod, modprobe and rmmod are all symlinks to /usr/bin/kmod, so the
+# /sbin entries below match nothing and /usr/bin/kmod is the one that fires.
+# Verified on Ubuntu 24.04: /sbin/modprobe, /usr/sbin/modprobe and
+# /sbin/insmod all resolve to /usr/bin/kmod.
+# The init_module/finit_module/delete_module syscall rules above are the
+# authoritative record; these path rules only add the tool invocation.
+-a always,exit -F perm=x -F auid!=-1 -F path=/usr/bin/kmod -k modules
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/insmod -k modules
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/modprobe -k modules
 -a always,exit -F perm=x -F auid!=-1 -F path=/sbin/rmmod -k modules
+-a always,exit -F perm=x -F auid!=-1 -F path=/usr/sbin/insmod -k modules
+-a always,exit -F perm=x -F auid!=-1 -F path=/usr/sbin/modprobe -k modules
+-a always,exit -F perm=x -F auid!=-1 -F path=/usr/sbin/rmmod -k modules
 -w /etc/modprobe.conf -p wa -k modules
 -w /etc/modprobe.d/ -p wa -k modules
 
@@ -448,6 +480,15 @@
 # Scripting interpreters -- frequently used to upgrade a basic shell to a
 # fully interactive one (e.g. python3 -c 'import pty; pty.spawn("/bin/bash")')
 # or to execute in-memory payloads that never touch disk.
+#
+# CAVEAT: /usr/bin/python3 is a symlink to a versioned binary
+# (python3.12 on Ubuntu 24.04) and a watch does not follow it, so this watch
+# does not fire for `python3 ...` on most distributions. Adding the versioned
+# path works but breaks on the next minor upgrade. Falco covers interpreter
+# execution instead and reports the resolved path in proc.exepath; see the
+# rule "Wazuh: Interactive command executed on terminal". Pin the versioned
+# path here only if you need the auditd record specifically:
+#   -w /usr/bin/python3.12 -p x -k interpreter
 -w /usr/bin/python3 -p x -k interpreter
 -w /usr/bin/perl -p x -k interpreter
 
@@ -605,6 +646,43 @@
 # being staged for execution under the wazuh-execd process.
 -w /var/ossec/var/incoming/ -p wa -k wazuh_bin
 -w /var/ossec/var/upgrade/ -p wa -k wazuh_bin
+
+
+# ============================================================================
+# SECTION 14b -- SECURITY SENSOR INTEGRITY (FALCO, LAUREL, eBPF)
+# ============================================================================
+# Purpose: the mutual-watch half of the auditd/Falco split. Falco watches
+# auditd's configuration (rule "Wazuh: Security sensor configuration
+# modified"); these rules let auditd watch Falco's. Neither sensor can be
+# silenced without the other recording it.
+#
+# Keys: falco_config, falco_exec, falco_logs, laurel_config, bpf_load
+
+# Falco rules and configuration. Narrowing a ruleset is a quieter way to go
+# dark than stopping the service, and leaves the unit looking healthy.
+-w /etc/falco/ -p wa -k falco_config
+
+# Falco binaries. Execution covers a manual `falco` run (a second instance
+# competing for the ring buffer) and falcoctl replacing drivers or rulesets.
+-w /usr/bin/falco -p x -k falco_exec
+-w /usr/bin/falcoctl -p x -k falco_exec
+
+# Falco's JSON event log, which the Wazuh agent tails. Truncating it destroys
+# any detection not yet forwarded to the manager.
+-w /var/log/falco/ -p wa -k falco_logs
+
+# LAUREL's configuration: the transform/filter settings here decide what of
+# this ruleset ever reaches Wazuh at all.
+-w /etc/laurel/ -p wa -k laurel_config
+
+# bpf(): loading an eBPF program. This is how Falco itself works, and also how
+# an eBPF rootkit hides processes or files from userspace -- including from
+# Falco. The auid!=-1 filter excludes programs loaded by systemd services
+# (which run with no login session), so Falco's own startup does not match;
+# what remains is an interactive user running bpftool, starting falco by hand,
+# or loading a program of their own.
+-a always,exit -F arch=b64 -S bpf -F auid!=-1 -k bpf_load
+-a always,exit -F arch=b32 -S bpf -F auid!=-1 -k bpf_load
 
 
 # ============================================================================

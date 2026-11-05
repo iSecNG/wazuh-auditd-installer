@@ -2,12 +2,12 @@
 # =============================================================================
 # install.sh -- Full Wazuh agent installer/uninstaller for Linux
 #
-# Installs or removes the Wazuh agent, auditd ruleset, and LAUREL on any
+# Installs or removes the Wazuh agent, auditd ruleset, LAUREL and Falco on any
 # mainstream Linux distribution. Run with --help for usage.
 #
 # Usage:
 #   sudo bash install.sh --manager <manager-ip> [OPTIONS]
-#   sudo bash install.sh --uninstall [--skip-auditd] [--skip-laurel]
+#   sudo bash install.sh --uninstall [--skip-auditd] [--skip-laurel] [--skip-falco]
 # =============================================================================
 set -euo pipefail
 
@@ -23,6 +23,8 @@ source "${REPO_DIR}/lib/detect.sh"
 source "${REPO_DIR}/lib/install-wazuh-agent.sh"
 # shellcheck source=lib/install-auditd.sh
 source "${REPO_DIR}/lib/install-auditd.sh"
+# shellcheck source=lib/install-falco.sh
+source "${REPO_DIR}/lib/install-falco.sh"
 # shellcheck source=lib/uninstall.sh
 source "${REPO_DIR}/lib/uninstall.sh"
 # shellcheck source=laurel/install-laurel.sh
@@ -52,6 +54,12 @@ if [[ "${UNINSTALL}" == "true" ]]; then
     echo
 
     # Uninstall in reverse order of installation
+    if [[ "${SKIP_FALCO}" != "true" ]]; then
+        uninstall_falco
+    else
+        info "Skipping Falco removal (--skip-falco)"
+    fi
+
     if [[ "${SKIP_LAUREL}" != "true" ]]; then
         uninstall_laurel
     else
@@ -80,6 +88,13 @@ if [[ "${UNINSTALL}" == "true" ]]; then
                 warn "LAUREL process still detected"
             else
                 ok "laurel       : not running"
+            fi
+        fi
+        if [[ "${SKIP_FALCO}" != "true" ]]; then
+            if pgrep -x falco >/dev/null 2>&1; then
+                warn "Falco process still detected"
+            else
+                ok "falco        : not running"
             fi
         fi
     else
@@ -123,6 +138,13 @@ else
     info "Skipping LAUREL (--skip-laurel)"
 fi
 
+if [[ "${SKIP_FALCO}" != "true" ]]; then
+    install_falco
+    configure_falco_localfile
+else
+    info "Skipping Falco (--skip-falco)"
+fi
+
 # ---- Post-install verification ----
 section "Verification"
 
@@ -151,6 +173,15 @@ if [[ "${DRY_RUN}" != "true" ]]; then
             ok "laurel       : running  (pid $(pgrep -x laurel | head -1))"
         else
             warn "LAUREL process not detected — verify with: pgrep -a laurel"
+            VERIFY_FAILED=$((VERIFY_FAILED + 1))
+        fi
+    fi
+
+    if [[ "${SKIP_FALCO}" != "true" ]]; then
+        if systemctl is-active --quiet "${_FALCO_UNIT:-falco-modern-bpf.service}"; then
+            ok "falco        : running  (${_FALCO_UNIT:-falco-modern-bpf.service})"
+        else
+            warn "Falco not active — check: journalctl -u ${_FALCO_UNIT:-falco-modern-bpf.service}"
             VERIFY_FAILED=$((VERIFY_FAILED + 1))
         fi
     fi

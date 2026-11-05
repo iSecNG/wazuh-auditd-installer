@@ -1,0 +1,14 @@
+# Minimal systemd container for exercising install.sh on an rpm-based distro.
+#
+# BASE is any almalinux:*, rockylinux/rockylinux:*, centos* or fedora:* tag.
+#
+# Same reasoning as Dockerfile.deb: curl and gnupg are left out on purpose so
+# the installer has to install its own prerequisites.
+ARG BASE=almalinux:9
+FROM ${BASE}
+
+RUN (dnf install -y systemd procps-ng sudo || yum install -y systemd procps-ng sudo) \
+    && (dnf clean all || yum clean all)
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

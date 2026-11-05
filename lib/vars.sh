@@ -4,7 +4,7 @@
 usage() {
     cat <<'EOF'
 Usage: sudo bash install.sh --manager <address> [OPTIONS]
-       sudo bash install.sh --uninstall [--skip-auditd] [--skip-laurel] [--dry-run]
+       sudo bash install.sh --uninstall [--skip-auditd] [--skip-laurel] [--skip-falco] [--dry-run]
 
 Required (install only):
   --manager <addr>                    Wazuh manager IP or FQDN  (WAZUH_MANAGER)
@@ -30,9 +30,10 @@ Wazuh agent deployment variables:
 Install options:
   --wazuh-version <version>           Pin Wazuh agent version, e.g. 4.9.1 (default: latest)
   --package-path <path>               Install from local .deb/.rpm file (skips repo setup)
-  --uninstall                         Remove Wazuh agent, auditd rules, and LAUREL
+  --uninstall                         Remove Wazuh agent, auditd rules, LAUREL and Falco
   --skip-auditd                       Skip auditd installation/removal and ruleset
   --skip-laurel                       Skip LAUREL installation/removal
+  --skip-falco                        Skip Falco installation/removal
   --dry-run                           Print actions without executing them
   --verbose                           Echo each command before it is executed
   -h, --help                          Show this help
@@ -75,6 +76,7 @@ parse_args() {
     : "${PACKAGE_PATH:=}"
     : "${SKIP_AUDITD:=false}"
     : "${SKIP_LAUREL:=false}"
+    : "${SKIP_FALCO:=false}"
     : "${UNINSTALL:=false}"
     : "${DRY_RUN:=false}"
     : "${VERBOSE:=false}"
@@ -100,6 +102,7 @@ parse_args() {
             --uninstall)                    UNINSTALL=true;                      shift   ;;
             --skip-auditd)                  SKIP_AUDITD=true;                    shift   ;;
             --skip-laurel)                  SKIP_LAUREL=true;                    shift   ;;
+            --skip-falco)                   SKIP_FALCO=true;                     shift   ;;
             --dry-run)                      DRY_RUN=true;                        shift   ;;
             --verbose)                      VERBOSE=true;                        shift   ;;
             -h|--help)                      usage; exit 0 ;;
@@ -107,7 +110,7 @@ parse_args() {
         esac
     done
 
-    export DRY_RUN VERBOSE SKIP_AUDITD SKIP_LAUREL UNINSTALL
+    export DRY_RUN VERBOSE SKIP_AUDITD SKIP_LAUREL SKIP_FALCO UNINSTALL
 }
 
 validate_vars() {

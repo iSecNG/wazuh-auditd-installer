@@ -1,0 +1,380 @@
+<!--
+  Falco Rules for Wazuh
+  ====================
+  Deploy to: /var/ossec/etc/rules/225000-det-falco-generic.xml  (on the MANAGER)
+
+  These rules consume the JSON events Falco writes to
+  /var/log/falco/events.json, which the Wazuh agent forwards via a <localfile>
+  block with log_format json.
+
+  Rule ID range: 225100 - 225399
+  All rules belong to group "falco".
+
+  SCOPE: this file covers the DETECTION half of the sensor split. auditd and
+  LAUREL cover the audit trail, authentication and account events, and the
+  audit subsystem's integrity; see 223000-det-laurel-generic.xml and
+  docs/falco-auditd-wazuh.md.
+
+  Falco JSON field reference (dot-notation as seen by Wazuh):
+    rule           name of the Falco rule that fired
+    priority       Emergency|Alert|Critical|Error|Warning|Notice|Informational|Debug
+    output         the rendered alert text
+    tags           rule tags, MITRE technique IDs among them
+    hostname       host that produced the event
+    output_fields  per-field values, e.g. output_fields.proc.cmdline
+
+  The "rule" values below are an API contract with
+  falco/rules/wazuh-falco-rules.yaml. Renaming a rule there silently drops it
+  to the generic priority rules at the end of this file.
+
+  ORDERING IS LOAD-BEARING. analysisd keeps the FIRST matching child of a
+  parent, so the generic priority rules 225380-225382 sit at the end of this
+  file on purpose. Moving them up disables every specific rule above them.
+
+  Validate against one real event before trusting this file:
+    tail -1 /var/log/falco/events.json | /var/ossec/bin/wazuh-logtest
+-->
+
+<group name="falco,">
+
+
+  <!-- ===================================================================== -->
+  <!-- BASE RULE                                                             -->
+  <!-- ===================================================================== -->
+
+  <!-- Any event from the Falco event log. Level 0: no alert, parent only. -->
+  <rule id="225100" level="0">
+    <location>/var/log/falco/events.json</location>
+    <description>Falco: base event.</description>
+    <group>falco,</group>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- CRITICAL: active compromise shapes                                    -->
+  <!-- ===================================================================== -->
+
+  <!-- auditd records the same connect() under the remote_shell key, kept at
+       level 3 as the audit trail. This event carries the destination address,
+       which the auditd record does not expose as a usable field. -->
+  <rule id="225110" level="14">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Reverse shell connection from shell binary$</field>
+    <description>Falco: shell binary opened an outbound connection, PROBABLE REVERSE SHELL. $(output)</description>
+    <group>falco,command_and_control,reverse_shell,</group>
+    <mitre>
+      <id>T1059</id>
+      <id>T1071</id>
+    </mitre>
+  </rule>
+
+  <!-- The nc -e and socat EXEC half of the reverse-shell family, where the
+       shell itself never calls connect(). -->
+  <rule id="225111" level="14">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Standard stream redirected to network connection$</field>
+    <description>Falco: stdio redirected onto a network socket, PROBABLE REVERSE SHELL. $(output)</description>
+    <group>falco,command_and_control,reverse_shell,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <rule id="225113" level="13">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Process launched from world-writable directory$</field>
+    <description>Falco: binary executed from /tmp, /var/tmp or /dev/shm, possible dropped payload. $(output)</description>
+    <group>falco,execution,</group>
+    <mitre>
+      <id>T1059</id>
+      <id>T1036</id>
+    </mitre>
+  </rule>
+
+  <!-- PwnKit (CVE-2021-4034) and the polkit bypass (CVE-2021-3560). The
+       laurel children 223131/223132 are at level 3: auditd records the
+       execution, this rule adds the non-root caller and the parent. -->
+  <rule id="225114" level="13">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Polkit privilege escalation attempt$</field>
+    <description>Falco: pkexec or dbus-send run by a non-root user, possible PwnKit or polkit bypass. $(output)</description>
+    <group>falco,privilege_escalation,exploit,</group>
+    <mitre>
+      <id>T1068</id>
+      <id>T1548</id>
+    </mitre>
+  </rule>
+
+  <!-- Catches the mv-into-place and unlink variants that the auditd
+       lib_preload watch reports differently. -->
+  <rule id="225115" level="14">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Library preload file modified$</field>
+    <description>Falco: ld.so.preload modified, HIGH RISK library injection or rootkit vector. $(output)</description>
+    <group>falco,persistence,rootkit,</group>
+    <mitre>
+      <id>T1574.006</id>
+    </mitre>
+  </rule>
+
+  <!-- Falco watching auditd's configuration. The reverse direction is auditd
+       keys falco_config / falco_logs / laurel_config, rules 223190-223193. -->
+  <rule id="225116" level="14">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Security sensor configuration modified$</field>
+    <description>Falco: sensor configuration modified (Falco, auditd, LAUREL or Wazuh agent). $(output)</description>
+    <group>falco,sensor_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+  <rule id="225117" level="14">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Security sensor service stopped$</field>
+    <description>Falco: command run to stop, disable or kill a security sensor. $(output)</description>
+    <group>falco,sensor_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+      <id>T1489</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- WARNING: strong indicators needing context                            -->
+  <!-- ===================================================================== -->
+
+  <rule id="225130" level="10">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: SSH private key read by unexpected process$</field>
+    <description>Falco: SSH private key or host key read by an unexpected process. $(output)</description>
+    <group>falco,credential_access,</group>
+    <mitre>
+      <id>T1552.004</id>
+    </mitre>
+  </rule>
+
+  <!-- auditd records every chmod under perm_mod at level 3; this fires only
+       on the bits that actually grant privilege. -->
+  <rule id="225131" level="10">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Setuid or setgid bit set on file$</field>
+    <description>Falco: setuid or setgid bit set on a file, possible persistent backdoor. $(output)</description>
+    <group>falco,persistence,</group>
+    <mitre>
+      <id>T1548.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Pairs with laurel rule 223194 on the auditd bpf_load key. An eBPF
+       rootkit can hide activity from userspace, Falco included, so this is
+       rated above the other warnings. -->
+  <rule id="225132" level="12">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: eBPF program loaded$</field>
+    <description>Falco: eBPF program loaded by an unexpected process, possible eBPF rootkit. $(output)</description>
+    <group>falco,defense_evasion,sensor_tampering,</group>
+    <mitre>
+      <id>T1562</id>
+      <id>T1014</id>
+    </mitre>
+  </rule>
+
+  <rule id="225133" level="10">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Shell history tampered$</field>
+    <description>Falco: shell history cleared, truncated or redirected, anti-forensic cleanup. $(output)</description>
+    <group>falco,defense_evasion,</group>
+    <mitre>
+      <id>T1070.003</id>
+    </mitre>
+  </rule>
+
+  <rule id="225134" level="10">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Tunnel or bind shell tool executed$</field>
+    <description>Falco: netcat, socat or a tunnelling client executed. $(output)</description>
+    <group>falco,command_and_control,</group>
+    <mitre>
+      <id>T1059</id>
+      <id>T1572</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- UPSTREAM RULE MAPPINGS                                                -->
+  <!--                                                                       -->
+  <!-- Falco's rule_matching is "first", and falco_rules.yaml is loaded       -->
+  <!-- before /etc/falco/rules.d, so for events both rulesets describe the    -->
+  <!-- upstream rule wins. Rather than reimplement it, the one overlapping    -->
+  <!-- upstream rule is mapped here directly. If upstream renames it, this    -->
+  <!-- rule stops matching and the event falls through to 225381 at level 8,  -->
+  <!-- so the detection degrades rather than disappearing.                    -->
+  <!-- ===================================================================== -->
+
+  <!-- A shell spawned below a non-shell application: the shape of remote code
+       execution through a web app, a database or a mail daemon. This repo
+       carried its own version of this rule, which never fired: upstream's
+       loads first and wins. Upstream's is also the better rule, with a
+       maintained list of protected spawners and exceptions for nginx
+       restarting itself, package managers and cron.
+
+       Upstream warns this rule is noisy and expects tuning. Keep it at 13
+       only until you have baselined it; the tuning belongs in
+       /etc/falco/falco_rules.local.yaml via the
+       user_known_shell_spawn_binaries list, not here. -->
+  <rule id="225141" level="13">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Run shell untrusted$</field>
+    <description>Falco: shell spawned below a non-shell application, possible remote code execution. $(output)</description>
+    <group>falco,execution,web_shell,</group>
+    <mitre>
+      <id>T1059</id>
+      <id>T1505.003</id>
+    </mitre>
+  </rule>
+
+  <!-- Covers reads of /etc/shadow, /etc/sudoers, /etc/pam.d and the rest of
+       upstream's sensitive_file_names list. auditd watches writes to these
+       files under the identity key; reads are what credential theft looks
+       like, and only Falco reports them. -->
+  <rule id="225140" level="10">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Read sensitive file untrusted$</field>
+    <description>Falco: sensitive credential file read by an untrusted process. $(output)</description>
+    <group>falco,credential_access,</group>
+    <mitre>
+      <id>T1003</id>
+      <id>T1003.008</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- NOTICE: volume drivers, correlated rather than alerted on             -->
+  <!--                                                                       -->
+  <!-- These three replace auditd's broad execve collection. Level 3 keeps    -->
+  <!-- them as the forensic trail; the frequency rules below raise the alert. -->
+  <!-- Size the indexer for 225150: it fires on every interactive command.   -->
+  <!-- ===================================================================== -->
+
+  <rule id="225150" level="3">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Interactive command executed on terminal$</field>
+    <description>Falco: interactive command executed on a terminal. $(output)</description>
+    <group>falco,execution,interactive,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <rule id="225151" level="3">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Reconnaissance tool executed$</field>
+    <description>Falco: host enumeration tool executed. $(output)</description>
+    <group>falco,reconnaissance,</group>
+    <mitre>
+      <id>T1082</id>
+      <id>T1033</id>
+    </mitre>
+  </rule>
+
+  <rule id="225152" level="3">
+    <if_sid>225100</if_sid>
+    <field name="rule">^Wazuh: Data transfer tool executed$</field>
+    <description>Falco: data transfer or encoding tool executed. $(output)</description>
+    <group>falco,exfiltration,</group>
+    <mitre>
+      <id>T1048</id>
+      <id>T1105</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- COMPOSITE RULES                                                       -->
+  <!--                                                                       -->
+  <!-- Falco has no frequency operator, so bursts are counted here. These     -->
+  <!-- replace the burst rules deleted from 223000-det-laurel-generic.xml     -->
+  <!-- (223175, 223211, 223253, 223261), which counted the same behaviour     -->
+  <!-- from auditd events.                                                   -->
+  <!--                                                                       -->
+  <!-- Baseline the frequency and timeframe values against your own hosts     -->
+  <!-- before trusting them. A configuration-management run or an admin       -->
+  <!-- troubleshooting session legitimately produces bursts.                  -->
+  <!-- ===================================================================== -->
+
+  <!-- frequency 15, not 10. Measured on Ubuntu 24.04: one SSH login produced
+       10 reconnaissance events from the MOTD scripts, which tripped this rule
+       at the original threshold on every login. Dropping uname, hostname and
+       lsb_release from the Falco rule's list brought a login down to 4, and
+       this threshold leaves headroom for several logins in the window.
+       Re-measure on your own images: a different MOTD or shell profile moves
+       the baseline, and this rule is only useful above it. -->
+  <rule id="225300" level="10" frequency="15" timeframe="120">
+    <if_matched_group>reconnaissance</if_matched_group>
+    <description>Falco: rapid succession of reconnaissance tools, probable post-compromise enumeration.</description>
+    <group>falco,reconnaissance,</group>
+    <mitre>
+      <id>T1082</id>
+    </mitre>
+  </rule>
+
+  <rule id="225301" level="12" frequency="6" timeframe="300">
+    <if_matched_group>exfiltration</if_matched_group>
+    <description>Falco: repeated data transfer tool use in a short window, possible active exfiltration.</description>
+    <group>falco,exfiltration,</group>
+    <mitre>
+      <id>T1048</id>
+    </mitre>
+  </rule>
+
+  <!-- Any two sensor-tampering events together mean the attacker is working
+       on the monitoring itself, which outranks whatever else they are doing. -->
+  <rule id="225302" level="15" frequency="2" timeframe="600">
+    <if_matched_group>sensor_tampering</if_matched_group>
+    <description>Falco: CRITICAL: multiple security sensor tampering events, active attack on monitoring.</description>
+    <group>falco,sensor_tampering,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+
+  <!-- ===================================================================== -->
+  <!-- GENERIC PRIORITY MAPPING: upstream falco_rules.yaml                   -->
+  <!--                                                                       -->
+  <!-- KEEP THESE LAST IN THE FILE. analysisd keeps the first matching child  -->
+  <!-- of a parent, so moving them above the rules on this page disables      -->
+  <!-- every one of them.                                                    -->
+  <!--                                                                       -->
+  <!-- These catch the ~90 rules Falco ships that this repo does not name     -->
+  <!-- individually. Levels are deliberately modest: run them for a while,    -->
+  <!-- find which ones matter in your environment, then give those their own  -->
+  <!-- rule in the 225200-225299 band above with a proper level and MITRE ID. -->
+  <!-- ===================================================================== -->
+
+  <rule id="225380" level="3">
+    <if_sid>225100</if_sid>
+    <field name="priority">^Notice$|^Informational$|^Debug$</field>
+    <description>Falco ($(priority)): $(output)</description>
+    <group>falco,falco_upstream,</group>
+  </rule>
+
+  <rule id="225381" level="8">
+    <if_sid>225100</if_sid>
+    <field name="priority">^Warning$|^Error$</field>
+    <description>Falco ($(priority)): $(output)</description>
+    <group>falco,falco_upstream,</group>
+  </rule>
+
+  <rule id="225382" level="12">
+    <if_sid>225100</if_sid>
+    <field name="priority">^Critical$|^Alert$|^Emergency$</field>
+    <description>Falco ($(priority)): $(output)</description>
+    <group>falco,falco_upstream,</group>
+  </rule>
+
+</group>

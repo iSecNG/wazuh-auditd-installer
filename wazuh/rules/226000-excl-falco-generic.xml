@@ -1,0 +1,85 @@
+<!--
+  Falco Rule Exclusions for Wazuh
+  ==============================
+  Deploy to: /var/ossec/etc/rules/226000-excl-falco-generic.xml  (on the MANAGER)
+
+  Rule ID range: 226000 - 226099
+
+  This file holds the environment-specific whitelists for the Falco detection
+  rules in 225000-det-falco-generic.xml. Keep them here rather than editing the
+  detection file, so the two stay separable when this repo is updated.
+
+  The numeric filename prefix matters: the manager loads etc/rules/ in filename
+  order, and every rule here references a 225xxx rule as its parent via
+  <if_sid>, which must already be loaded.
+
+  NOTE ON WHERE TO FILTER: for recurring host noise, prefer filtering in Falco
+  itself over an exclusion here. A rule that never fires costs nothing, while
+  an event excluded at this layer has already travelled through the agent,
+  analysisd and into the archives. The ruleset exposes the wz_user_known_activity
+  macro for exactly this: redefine it in a file that sorts after the shipped
+  ruleset, for example /etc/falco/rules.d/zz-local-tuning.yaml:
+
+    - macro: wz_user_known_activity
+      condition: (proc.exepath = /opt/backup/bin/agent)
+
+  Use this file instead when the event must still be recorded for forensics but
+  should not alert, or when the noise is only distinguishable using fields the
+  Falco rule does not have.
+-->
+
+<group name="falco,">
+
+  <!-- The Wazuh SCA module reads the files it assesses. On every scan cycle
+       wazuh-modulesd opens /etc/shadow, /etc/sudoers, /etc/sudoers.d/* and
+       /etc/pam.d/* for the CIS checks, all of which are on Falco's
+       sensitive_files list, so upstream's "Read sensitive file untrusted"
+       fires and 225140 raises it to level 10. Measured on the test host: 47
+       such events in one soak, every one of them the agent assessing itself.
+
+       Level 0 rather than 3: these recur on a fixed schedule and carry no
+       forensic value, and the same read is already recorded by auditd under
+       the identity key. Reads by anything other than the agent still hit
+       225140.
+
+       This is filtered here rather than in Falco deliberately. Suppressing it
+       at the sensor would need an `override: append` on an upstream rule, and
+       an override naming a rule that upstream later renames is a hard load
+       error, which would stop Falco from starting at all. A stale exclusion
+       here only costs noise. -->
+  <rule id="226002" level="0">
+    <if_sid>225140</if_sid>
+    <field name="output_fields.proc.name">^wazuh-modulesd$</field>
+    <description>Falco: sensitive file read by the Wazuh SCA module (whitelisted).</description>
+    <group>falco,sca_access,</group>
+  </rule>
+
+  <!-- Configuration management runs a burst of enumeration on every pass
+       (facts gathering in Ansible, Puppet or Chef), which trips 225300. The
+       individual events still land at level 3 via 225151.
+
+       Disabled by default: the parent process name depends on how the tool is
+       invoked on your hosts. Confirm it against a real event first with
+         tail -1 /var/log/falco/events.json | /var/ossec/bin/wazuh-logtest
+       then set the right names here and remove the "never_match_" prefix. -->
+  <rule id="226000" level="0">
+    <if_sid>225151</if_sid>
+    <field name="output_fields.proc.pname">^never_match_ansible$|^never_match_puppet$</field>
+    <description>Falco: reconnaissance by a configuration management run (whitelisted).</description>
+    <group>falco,reconnaissance,</group>
+  </rule>
+
+  <!-- Package management legitimately fetches over the network, which can
+       trip the data-transfer burst rule 225301 during a patch window.
+       Scoped to the package manager as the parent, so a user running curl
+       still reaches 225152 and 225301.
+
+       Disabled by default for the same reason as above. -->
+  <rule id="226001" level="0">
+    <if_sid>225152</if_sid>
+    <field name="output_fields.proc.pname">^never_match_apt$|^never_match_dnf$|^never_match_unattended-upgr$</field>
+    <description>Falco: data transfer by a package manager (whitelisted).</description>
+    <group>falco,exfiltration,</group>
+  </rule>
+
+</group>
