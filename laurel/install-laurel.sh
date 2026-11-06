@@ -56,6 +56,13 @@ _LAUREL_PINNED_VERSION="v0.8.2"
 _LAUREL_PINNED_SHA256="89f6bfbed42a5b6824aa847cecf43abc55dafe6778515c3514be43c037ef2662"
 _LAUREL_VERSION="${LAUREL_VERSION:-${_LAUREL_PINNED_VERSION}}"
 _LAUREL_SHA256="${LAUREL_SHA256:-}"
+# Upstream's SELinux policy, always taken from the pinned tag (it covers file
+# paths and auditd's plugin launch, not anything version-specific). Loaded into
+# the kernel as root, so it is pinned like the binary -- bump with the version.
+_LAUREL_SELINUX_URL="https://raw.githubusercontent.com/threathunters-io/laurel/${_LAUREL_PINNED_VERSION}/contrib/selinux"
+_LAUREL_SELINUX_SHA256="005a8a1eec1e779f26a0f7f9489f5c28dd27fbf14efef8011e7267609b96a522  laurel.te
+3fdb8bc23a75d9f23e40c2edf94c4905d42787f9834b76c9cf12fff8af5eddeb  laurel.fc
+3df77360fc6426ac4ec75472937811fad1126321fda139e52d005c96876730fb  Makefile"
 _LAUREL_USER="_laurel"
 _LAUREL_BIN="/usr/local/sbin/laurel"
 _LAUREL_CONF_DIR="/etc/laurel"
@@ -169,6 +176,72 @@ _laurel_build_from_source() {
     [[ -x "${_LAUREL_BUILT_BIN}" ]] || die "Build failed — ${_LAUREL_BUILT_BIN} not found."
 }
 
+# Load upstream's SELinux module and label LAUREL's files. No-op without SELinux.
+# Without the module auditd runs LAUREL inside auditd_t, where its chown of
+# /var/log/laurel is denied (EACCES even as root) and the plugin crash-loops
+# until auditd gives up. Built on the host: a .pp built elsewhere can reference
+# types this host's base policy lacks.
+_laurel_selinux() {
+    command -v selinuxenabled >/dev/null 2>&1 && selinuxenabled || return 0
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        info "[DRY-RUN] Would build and load the LAUREL SELinux module and relabel its files"
+        return 0
+    fi
+
+    # Same plugin-directory test as install_laurel: 2.x launches plugins from audispd.
+    local auditd=3 conf=/etc/audit/plugins.d/laurel.conf
+    [[ -d /etc/audit/plugins.d ]] || { auditd=2; conf=/etc/audisp/plugins.d/laurel.conf; }
+
+    # restorecon labels the resolved path. Since Fedora 42 /usr/local/sbin is a
+    # symlink to bin, so the binary really is /usr/local/bin/laurel, a path
+    # upstream's laurel.fc does not list. Judge the module by what that path
+    # would get, so a module without the extra entry is rebuilt.
+    local real_bin; real_bin="$(readlink -f "${_LAUREL_BIN}")"
+    if matchpathcon -n "${real_bin}" 2>/dev/null | grep -q laurel_exec_t; then
+        ok "SELinux module 'laurel' already loaded"
+    else
+        info "SELinux is enabled — building the LAUREL policy module ..."
+        if [[ ! -f /usr/share/selinux/devel/Makefile ]]; then
+            if   command -v dnf    >/dev/null 2>&1; then dnf install -y -q selinux-policy-devel
+            elif command -v yum    >/dev/null 2>&1; then yum install -y -q selinux-policy-devel
+            elif command -v zypper >/dev/null 2>&1; then zypper install -y selinux-policy-devel
+            elif command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq selinux-policy-dev >/dev/null
+            fi
+            [[ -f /usr/share/selinux/devel/Makefile ]] \
+                || die "SELinux policy development files not found (/usr/share/selinux/devel/Makefile)."
+        fi
+
+        [[ -d "${_LAUREL_BUILD_DIR:-}" ]] || { _LAUREL_BUILD_DIR=$(mktemp -d /tmp/laurel-build-XXXX); trap _laurel_cleanup EXIT; }
+        local dir="${_LAUREL_BUILD_DIR}/selinux" f
+        mkdir -p "${dir}"
+        for f in laurel.te laurel.fc Makefile; do
+            curl -fsSL --retry 3 --connect-timeout 15 -o "${dir}/${f}" "${_LAUREL_SELINUX_URL}/${f}" \
+                || die "Download of ${_LAUREL_SELINUX_URL}/${f} failed."
+        done
+        (cd "${dir}" && sha256sum -c --quiet - <<<"${_LAUREL_SELINUX_SHA256}") \
+            || die "sha256 mismatch on the LAUREL SELinux policy from ${_LAUREL_SELINUX_URL}"
+        [[ "${real_bin}" == "${_LAUREL_BIN}" ]] \
+            || echo "${real_bin}	--	gen_context(system_u:object_r:laurel_exec_t,s0)" >> "${dir}/laurel.fc"
+        # Upstream's Makefile defines both auditd variants by default; the 2.x
+        # one requires audisp_t, which current policies no longer have.
+        make -C "${dir}" AUDITD_VERSIONS="${auditd}" laurel.pp >/dev/null \
+            || die "Building the LAUREL SELinux module failed."
+        semodule -i "${dir}/laurel.pp"
+        ok "SELinux module 'laurel' loaded"
+    fi
+
+    restorecon -RF "${_LAUREL_BIN}" "${_LAUREL_CONF_DIR}" "${_LAUREL_LOG_DIR}" "${conf}" \
+        || warn "restorecon reported errors — check labels with: ls -Z ${_LAUREL_BIN} ${_LAUREL_LOG_DIR}"
+    local label; label="$(ls -Z "${real_bin}" | cut -d' ' -f1)"
+    if [[ "${label}" == *laurel_exec_t* ]]; then
+        ok "SELinux labels applied  (${label})"
+    else
+        warn "${real_bin} is labelled ${label}, not laurel_exec_t — auditd will run LAUREL"
+        warn "in its own auditd_t domain, where it cannot start. Check: matchpathcon ${real_bin}"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # install_laurel — idempotent; skips if binary already present
 # ---------------------------------------------------------------------------
@@ -177,6 +250,15 @@ install_laurel() {
 
     if [[ -x "${_LAUREL_BIN}" ]]; then
         ok "LAUREL already installed at ${_LAUREL_BIN} — skipping"
+        # Repairs installs made before the SELinux module was added.
+        _laurel_selinux
+        # A plugin that crash-looped past max_restarts stays dead; a reload
+        # rebuilds auditd's plugin list and starts it again.
+        if [[ "${DRY_RUN:-false}" != "true" ]] && ! pgrep -x laurel >/dev/null 2>&1; then
+            info "LAUREL not running — signalling auditd to restart its plugins ..."
+            pkill -HUP auditd || true
+            nap 2
+        fi
         return 0
     fi
 
@@ -188,6 +270,7 @@ install_laurel() {
             info "[DRY-RUN] Would install the static LAUREL ${_LAUREL_VERSION} x86_64-musl release binary"
         fi
         info "[DRY-RUN] Would create user '${_LAUREL_USER}' and register auditd plugin"
+        _laurel_selinux
         return 0
     fi
 
@@ -330,6 +413,8 @@ path = ${_LAUREL_BIN}
 args = --config ${_LAUREL_CONF}
 PLUGIN
     ok "Plugin registered in ${plugin_dir}/laurel.conf"
+
+    _laurel_selinux
 
     # Step 7: reload auditd to pick up the new plugin
     info "Signalling auditd to reload configuration ..."

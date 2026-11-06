@@ -119,6 +119,24 @@ Removes the agent, the repo definitions, `99-wazuh.rules`, the LAUREL binary, co
 
 A ruleset at `/etc/audit/rules.d/audit.rules` is only removed if it carries this installer's marker line, so a distribution-provided ruleset is left alone. `/var/log/laurel` and `/var/log/falco` are both preserved: they may hold forensic data.
 
+## Built on open source
+
+This project is glue around excellent open-source work. Many thanks to the people behind it:
+
+| Project | What it does here | License |
+|---|---|---|
+| [Wazuh](https://github.com/wazuh/wazuh) | The agent that ships everything to the manager | GPL-2.0 |
+| [Linux Audit](https://github.com/linux-audit/audit-userspace) (auditd) | Kernel audit trail | GPL-2.0+ |
+| [LAUREL](https://github.com/threathunters-io/laurel) | Turns auditd records into enriched JSON | GPL-3.0+ |
+| [Falco](https://github.com/falcosecurity/falco) and its [rules](https://github.com/falcosecurity/rules) | Runtime behavioural detection | Apache-2.0 |
+| [Ansible](https://github.com/ansible/ansible) and [community.general](https://github.com/ansible-collections/community.general) | Fleet deployment | GPL-3.0+ |
+| [MITRE ATT&CK®](https://attack.mitre.org/) | Technique IDs mapped in both rulesets | [ATT&CK terms of use](https://attack.mitre.org/resources/legal-and-branding/terms-of-use/) |
+
+None of these are vendored: the installer fetches them from upstream at install time.
+They keep their own licenses, which the license below does not change.
+[`sbom.cdx.json`](sbom.cdx.json) lists them as a CycloneDX SBOM with versions,
+pins and sources.
+
 ## License
 
 Business Source License 1.1 — see [LICENSE](LICENSE). Free for personal non-commercial use, non-profits and NGOs, and customers under a current service agreement; other production use requires a commercial license. Converts to Apache 2.0 on 2030-05-05. Contact sales@isecng.de.
