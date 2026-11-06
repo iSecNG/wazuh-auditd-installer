@@ -32,3 +32,16 @@ sudo LAUREL_BUILD_FROM_SOURCE=1 bash install.sh --manager 10.0.0.1
 
 The source build installs a Rust toolchain via `rustup` when `cargo` is absent. On hosts where neither path is acceptable, use `--skip-laurel`.
 
+## SELinux
+
+Upstream's release tarballs ship no SELinux policy. Without one, on an SELinux host (Fedora, RHEL and its rebuilds), auditd starts LAUREL inside its own `auditd_t` domain. There LAUREL's `chown` of `/var/log/laurel` is denied, so it crash-loops (`chown: /var/log/laurel: EACCES` in `journalctl -u auditd`) until auditd gives up.
+
+When `selinuxenabled` succeeds, the installer:
+
+1. installs `selinux-policy-devel`;
+2. downloads upstream's `contrib/selinux` files (`laurel.te`, `laurel.fc`, `Makefile`) from the pinned tag and checks them against the sha256 values in `install-laurel.sh`;
+3. builds the module on the host and loads it with `semodule -i`. On Fedora 42+ `/usr/local/sbin` is a symlink to `bin`, so the real path `/usr/local/bin/laurel` is added to `laurel.fc`, since upstream doesn't list it;
+4. relabels the binary, config, log directory and plugin config with `restorecon`.
+
+Upstream's policy runs LAUREL in its own `laurel_t` domain, which it marks permissive. Re-running the installer on a host where LAUREL is already installed applies the module and reloads auditd, so a re-run also fixes hosts installed before this step existed. `--uninstall` removes the module.
+

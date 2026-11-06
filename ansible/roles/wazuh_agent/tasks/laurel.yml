@@ -10,14 +10,23 @@
 
 # ponytail: runs this repo's install-laurel.sh instead of re-expressing its
 # pinned-sha download, source-build fallback and plugin-dir detection in YAML.
-# The script is self-contained and idempotent (it exits early if the binary is
-# there); `creates` keeps Ansible from copying and running it on every pass.
 # Port it to native tasks only if LAUREL config needs to be templated per host.
+#
+# Runs on every pass, with no `creates:`. With the binary present the script
+# skips the install but still repairs the host: it loads the SELinux module
+# that older installs lack and reloads auditd if LAUREL is not running. It does
+# not upgrade, so changing laurel_version leaves existing hosts on their version.
+# changed_when matches the script's messages for actual changes, so keep the two
+# in sync.
 - name: Install LAUREL
   ansible.builtin.script:
     cmd: "{{ wazuh_installer_repo }}/laurel/install-laurel.sh"
-    creates: /usr/local/sbin/laurel
   environment:
     LAUREL_VERSION: "{{ laurel_version }}"
     LAUREL_SHA256: "{{ laurel_sha256 }}"
     LAUREL_BUILD_FROM_SOURCE: "{{ '1' if laurel_build_from_source else '0' }}"
+  register: laurel_install
+  changed_when: >-
+    'Installed /usr/local/sbin/laurel' in laurel_install.stdout or
+    "SELinux module 'laurel' loaded" in laurel_install.stdout or
+    'signalling auditd' in laurel_install.stdout

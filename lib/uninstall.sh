@@ -151,6 +151,12 @@ uninstall_laurel() {
         ok "/usr/local/sbin/laurel not found — skipping"
     fi
 
+    if command -v semodule >/dev/null 2>&1 && semodule -l 2>/dev/null | grep -x laurel >/dev/null; then
+        info "Removing LAUREL SELinux module ..."
+        run semodule -r laurel
+        ok "SELinux module removed"
+    fi
+
     if [[ -d /etc/laurel ]]; then
         info "Removing LAUREL config directory (/etc/laurel) ..."
         run rm -rf /etc/laurel
