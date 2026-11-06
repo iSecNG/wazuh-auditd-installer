@@ -1,0 +1,94 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-11-06T00:00:00Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "wazuh-linux-sensors",
+      "name": "wazuh-linux-sensors",
+      "supplier": { "name": "isecng" },
+      "licenses": [ { "license": { "id": "BUSL-1.1" } } ]
+    },
+    "properties": [
+      { "name": "note", "value": "Hand-maintained. Components are fetched at install time, not vendored. Components without a version are installed at whatever the upstream repo or distribution ships as latest." }
+    ]
+  },
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "wazuh-agent",
+      "name": "wazuh-agent",
+      "supplier": { "name": "Wazuh, Inc.", "url": [ "https://wazuh.com/" ] },
+      "licenses": [ { "license": { "id": "GPL-2.0-only" } } ],
+      "purl": "pkg:generic/wazuh/wazuh-agent",
+      "externalReferences": [
+        { "type": "distribution", "url": "https://packages.wazuh.com/" },
+        { "type": "vcs", "url": "https://github.com/wazuh/wazuh" }
+      ],
+      "properties": [ { "name": "version-pin", "value": "latest unless --wazuh-version is given" } ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "laurel",
+      "name": "laurel",
+      "version": "0.8.2",
+      "supplier": { "name": "threathunters-io", "url": [ "https://github.com/threathunters-io/laurel" ] },
+      "licenses": [ { "license": { "id": "GPL-3.0-or-later" } } ],
+      "purl": "pkg:github/threathunters-io/laurel@v0.8.2",
+      "hashes": [ { "alg": "SHA-256", "content": "89f6bfbed42a5b6824aa847cecf43abc55dafe6778515c3514be43c037ef2662" } ],
+      "externalReferences": [
+        { "type": "distribution", "url": "https://github.com/threathunters-io/laurel/releases/download/v0.8.2/laurel-0.8.2-x86_64-musl.tar.gz" },
+        { "type": "vcs", "url": "https://github.com/threathunters-io/laurel.git" }
+      ],
+      "properties": [ { "name": "note", "value": "Hash is of the x86_64-musl release tarball. Other architectures build from the v0.8.2 tag with cargo. The SELinux policy is taken from contrib/selinux at the same tag." } ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "falco",
+      "name": "falco",
+      "supplier": { "name": "The Falco Authors (CNCF)", "url": [ "https://falco.org/" ] },
+      "licenses": [ { "license": { "id": "Apache-2.0" } } ],
+      "purl": "pkg:generic/falcosecurity/falco",
+      "externalReferences": [
+        { "type": "distribution", "url": "https://download.falco.org/packages/" },
+        { "type": "vcs", "url": "https://github.com/falcosecurity/falco" }
+      ],
+      "properties": [ { "name": "version-pin", "value": "latest from the falcosecurity stable repo; ships the upstream falcosecurity/rules ruleset" } ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "auditd",
+      "name": "audit",
+      "supplier": { "name": "Linux Audit Project", "url": [ "https://github.com/linux-audit/audit-userspace" ] },
+      "licenses": [ { "license": { "id": "GPL-2.0-or-later" } } ],
+      "purl": "pkg:generic/linux-audit/audit-userspace",
+      "properties": [ { "name": "version-pin", "value": "distribution package (auditd + audispd-plugins on Debian/Ubuntu, audit elsewhere)" } ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "community.general",
+      "name": "community.general",
+      "version": ">=6.0.0",
+      "scope": "optional",
+      "licenses": [ { "license": { "id": "GPL-3.0-or-later" } } ],
+      "purl": "pkg:generic/ansible-collections/community.general",
+      "externalReferences": [ { "type": "vcs", "url": "https://github.com/ansible-collections/community.general" } ],
+      "properties": [ { "name": "note", "value": "Ansible deployment path only" } ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "rust-toolchain",
+      "name": "rustup",
+      "scope": "optional",
+      "licenses": [ { "expression": "MIT OR Apache-2.0" } ],
+      "externalReferences": [ { "type": "distribution", "url": "https://sh.rustup.rs" } ],
+      "properties": [ { "name": "note", "value": "Build-time only, when LAUREL is compiled from source (non-x86_64 or LAUREL_BUILD_FROM_SOURCE=1)" } ]
+    }
+  ],
+  "dependencies": [
+    { "ref": "wazuh-linux-sensors", "dependsOn": [ "wazuh-agent", "laurel", "falco", "auditd" ] },
+    { "ref": "laurel", "dependsOn": [ "auditd" ] }
+  ]
+}
